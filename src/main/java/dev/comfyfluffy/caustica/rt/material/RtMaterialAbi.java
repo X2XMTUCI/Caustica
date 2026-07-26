@@ -29,4 +29,14 @@ public final class RtMaterialAbi {
                     + " primitive records for " + triangles + " triangles");
         }
     }
+
+    public static void requireTerrainParity(int materialFloatCount, int indexCount, int cornerUvFloatCount) {
+        requireTriangleParity(materialFloatCount, indexCount);
+        int triangles = indexCount / 3;
+        int expectedUvFloats = Math.multiplyExact(triangles, 6);
+        if (cornerUvFloatCount != expectedUvFloats) {
+            throw new IllegalArgumentException("terrain UV/index mismatch: " + cornerUvFloatCount
+                    + " corner-UV floats for " + triangles + " triangles; expected " + expectedUvFloats);
+        }
+    }
 }

@@ -14,6 +14,7 @@ import org.lwjgl.vulkan.VkDependencyInfo;
 import org.lwjgl.vulkan.VkMemoryBarrier2;
 
 import static org.lwjgl.vulkan.KHRSynchronization2.VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+import static org.lwjgl.vulkan.KHRSynchronization2.VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR;
 import static org.lwjgl.vulkan.KHRSynchronization2.vkCmdPipelineBarrier2KHR;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_SHADER_READ_BIT;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_TRANSFER_WRITE_BIT;
@@ -27,9 +28,9 @@ final class RtSectionBuilder {
     /** Upload a non-empty packed section and prepare, but do not record, its BLAS build. */
     static PreparedSection prepare(RtContext ctx, PackedSection packed,
                                    RtAccel.OpacityMicromapInput ommInput,
-                                   boolean compactBlas,
                                    long key, int sox, int soy, int soz) {
-        RtMaterialAbi.requireTriangleParity(packed.material().length, packed.indices().length);
+        RtMaterialAbi.requireTerrainParity(
+                packed.material().length, packed.indices().length, packed.uvs().length);
         int vertCount = packed.positions().length / 3;
         int asInput = org.lwjgl.vulkan.KHRAccelerationStructure
                 .VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
@@ -70,13 +71,15 @@ final class RtSectionBuilder {
             upload.flush();
 
             blas = RtAccel.prepareTerrainBlas(ctx, positions, vertCount, indices,
-                    packed.bucketTris(), ommInput, compactBlas, label + " BLAS");
+                    packed.bucketTris(), ommInput, label + " BLAS");
             return new PreparedSection(key, positions, indices, uvs, material, upload, blas,
-                    packed.triBase(), sox, soy, soz, packed.lights());
+                    packed.triBase(), packed.indices().length / 3,
+                    sox, soy, soz);
         } catch (Throwable t) {
             if (blas != null) {
                 destroy(new PreparedSection(key, positions, indices, uvs, material, upload, blas,
-                        packed.triBase(), sox, soy, soz, packed.lights()));
+                        packed.triBase(), packed.indices().length / 3,
+                        sox, soy, soz));
             } else {
                 if (upload != null) upload.destroy();
                 if (material != null) material.destroy();
@@ -105,9 +108,12 @@ final class RtSectionBuilder {
             barrier.get(0).sType$Default()
                     .srcStageMask(VK_PIPELINE_STAGE_2_TRANSFER_BIT)
                     .srcAccessMask(VK_ACCESS_2_TRANSFER_WRITE_BIT)
-                    .dstStageMask(VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR)
-                    // Vertex/index build inputs are shader reads at the AS-build stage. The
-                    // ACCELERATION_STRUCTURE_READ access class is for reading AS objects themselves.
+                    .dstStageMask(VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR
+                            | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR)
+                    // Vertex/index data is consumed by the AS build; UV/material buffers are consumed
+                    // later by hit shaders. Cover both destinations explicitly. Small uploads happened
+                    // to become visible through queue/timeline ordering, but multi-megabyte 256x meshes
+                    // could expose partially copied primitive records as false materials/large holes.
                     .dstAccessMask(VK_ACCESS_2_SHADER_READ_BIT);
             VkDependencyInfo dependency = VkDependencyInfo.calloc(stack).sType$Default().pMemoryBarriers(barrier);
             vkCmdPipelineBarrier2KHR(cmd, dependency);
@@ -130,11 +136,10 @@ final class RtSectionBuilder {
         prepared.positions.destroy();
     }
 
-    /** Worker-owned native section state paired with its prepared BLAS. {@code lights} = packed
-     *  section-local RIS light records (CPU-side, flattened into the global buffer at publish). */
+    /** Worker-owned native section state paired with its prepared BLAS. */
     record PreparedSection(long key, RtBuffer positions, RtBuffer indices, RtBuffer uvs,
                            RtBuffer material, RtBuffer upload, RtAccel.PreparedBlas blas, int[] triBase,
-                           int sx, int sy, int sz, float[] lights) {
+                           int triangleCount, int sx, int sy, int sz) {
         void releaseUpload() {
             upload.destroy();
         }
@@ -146,7 +151,7 @@ final class RtSectionBuilder {
 
         PreparedSection withBlas(RtAccel.PreparedBlas replacement) {
             return new PreparedSection(key, positions, indices, uvs, material, upload, replacement,
-                    triBase, sx, sy, sz, lights);
+                    triBase, triangleCount, sx, sy, sz);
         }
     }
 }

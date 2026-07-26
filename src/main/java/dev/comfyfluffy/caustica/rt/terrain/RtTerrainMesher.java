@@ -10,6 +10,7 @@ import dev.comfyfluffy.caustica.rt.RtFrameStats;
 import dev.comfyfluffy.caustica.rt.accel.RtAccel;
 import dev.comfyfluffy.caustica.rt.accel.RtBuffer;
 import dev.comfyfluffy.caustica.rt.material.RtMaterialAbi;
+import dev.comfyfluffy.caustica.rt.material.RtBlockMaterials;
 import dev.comfyfluffy.caustica.rt.material.RtMaterials;
 import dev.comfyfluffy.caustica.rt.material.RtMaterialRegistry;
 import it.unimi.dsi.fastutil.floats.FloatArrayList;
@@ -56,6 +57,14 @@ import java.util.ArrayList;
 import java.util.List;
 
 final class RtTerrainMesher {
+    static float resolutionScaledDepth(float requestedDepth, int cellsX, int cellsY,
+                                       float worldSpanU, float worldSpanV) {
+        // Physical height is encoded by the normalized LabPBR alpha value, not by texel size. Scaling
+        // depth by 16 / textureResolution made the same map 2x shallower at 32x and 16x shallower at
+        // 256x. Grid resolution controls only spatial detail; the authored displacement range is stable.
+        return requestedDepth;
+    }
+
     /**
      * Reusable per-worker-thread meshing state. The mesh + captures are reset between tasks so their
      * backing arrays amortize across sections instead of re-growing per task. Everything the result carries out —
@@ -103,37 +112,14 @@ final class RtTerrainMesher {
         if (mesh.isEmpty()) {
             return new CpuSection(null, null);
         }
-        // RIS emitter-NEE light collection — BEFORE packing: it also stamps NEE membership into the prim
-        // records, which packSection then copies out. Only opaque + cutout can emit (glass is shaded
-        // emission-free, water never emits; lava lives in the opaque bucket).
-        float[] lights = EMPTY_LIGHTS;
-        if (CausticaConfig.Rt.Lights.RIS_CANDIDATES.value() > 0) {
-            FloatArrayList collected = new FloatArrayList();
-            float minFill = CausticaConfig.Rt.Lights.MIN_FILL_RATIO.value();
-            collectLights(collected, mesh.opaque, materials, minFill);
-            collectLights(collected, mesh.cutout, materials, minFill);
-            if (!collected.isEmpty()) {
-                lights = collected.toFloatArray();
-            }
-        }
         Geom cutout = mesh.cutoutOrEmpty();
         RtAccel.OpacityMicromapInput ommInput =
                 RtTerrainOmm.buildInput(cutout.triCount(), cutout.cornerUv.elements(),
                         cutout.ommSprites.elements(), cutout.ommSprites.size());
-        return new CpuSection(packSection(mesh, lights), ommInput);
+        return new CpuSection(packSection(mesh), ommInput);
     }
 
-    private static final float[] EMPTY_LIGHTS = new float[0];
-
-    private static void collectLights(FloatArrayList out, Geom geom,
-                                      RtMaterialRegistry.Snapshot materials, float minFillRatio) {
-        if (geom != null && !geom.idx.isEmpty()) {
-            RtLightCollector.collectBucket(out, geom.verts, geom.prim, geom.cornerUv,
-                    geom.ommSprites.elements(), materials, minFillRatio);
-        }
-    }
-
-    private static PackedSection packSection(SectionMesh mesh, float[] lights) {
+    private static PackedSection packSection(SectionMesh mesh) {
         Geom[] buckets = mesh.buckets(); // { solid, cutout, translucent, water }, indexed by RtAccel.BUCKET_*
         int vertFloats = 0, idxCount = 0, uvFloats = 0, primFloats = 0, triCount = 0;
         int[] bucketTris = new int[buckets.length];
@@ -145,7 +131,7 @@ final class RtTerrainMesher {
             bucketTris[b] = buckets[b].triCount();
             triCount += bucketTris[b];
         }
-        RtMaterialAbi.requireTriangleParity(primFloats, idxCount);
+        RtMaterialAbi.requireTerrainParity(primFloats, idxCount, uvFloats);
 
         float[] positions = new float[vertFloats];
         int[] indices = new int[idxCount];
@@ -178,13 +164,14 @@ final class RtTerrainMesher {
             vertBase += vertSize / 3;
             triAcc += bucketTris[b];
         }
-        return new PackedSection(positions, indices, uvs, material, bucketTris, triBase, lights);
+        return new PackedSection(positions, indices, uvs, material, bucketTris, triBase);
     }
 
     private static void tessellate(BlockAndTintGetter region, BlockStateModelSet modelSet,
                                    QuadEmitter blockEmitter, RandomSource blockRandom, QuadCapture capture,
                                    FluidRenderer fluidRenderer, FluidCapture fluidCapture,
-                                   SectionMesh mesh, BlockPos.MutableBlockPos m, int scx, int scy, int scz) {
+                                   SectionMesh mesh, BlockPos.MutableBlockPos m,
+                                   int scx, int scy, int scz) {
         int sox = scx << 4, soy = scy << 4, soz = scz << 4;
         capture.cur = mesh;
         capture.view = region;
@@ -231,15 +218,13 @@ final class RtTerrainMesher {
         }
     }
 
-
     /** Pure-CPU worker result: tessellated mesh plus optional opacity micromap input for its cutout bucket. */
     record CpuSection(PackedSection packed, RtAccel.OpacityMicromapInput opacityMicromap) {
     }
 
-    /** Worker-packed terrain payload; native preparation allocates buffers and bulk-copies these arrays.
-     *  {@code lights} = packed section-local RIS light records (possibly empty), CPU-side only. */
+    /** Worker-packed terrain payload; native preparation allocates buffers and bulk-copies these arrays. */
     record PackedSection(float[] positions, int[] indices, float[] uvs, float[] material,
-                         int[] bucketTris, int[] triBase, float[] lights) {
+                         int[] bucketTris, int[] triBase) {
     }
 
 
@@ -418,9 +403,18 @@ final class RtTerrainMesher {
         private static final float TRANSLUCENT_INSET = 2.0e-4f; // inward recess (blocks) for glass/ice vs coplanar neighbours
         private static final float COINCIDENT_EPS = 1.0e-4f; // verts this close are "the same" point
         private static final int RESOLVE_CAP = 128;          // skip the O(n^2) resolve for pathological blocks
+        private static final int PRIM_FLAG_MESH_DISPLACED = 1;
+        private static final int PRIM_FLAG_MESH_CLOSURE = 1 << 1;
         private final List<PendingQuad> pending = new ArrayList<>(8);
         private int pendingCount;
+        // Only opaque, height-mapped displacement candidates are deferred until the section-wide
+        // resolution is known. Ordinary/cutout/translucent quads still stream directly into SectionMesh.
         private int[] gidScratch = new int[0];
+        private float[] heightScratch = new float[0];
+        private final float[] displacedUScratch = new float[4];
+        private final float[] displacedVScratch = new float[4];
+        private final float[] displacedLocalUScratch = new float[4];
+        private final float[] displacedLocalVScratch = new float[4];
 
         /** Capture a final Fabric Renderer API quad before raster AO/directional lighting is applied. */
         private void putFabric(MutableQuadView quad) {
@@ -442,7 +436,6 @@ final class RtTerrainMesher {
             ChunkSectionLayer layer = quad.chunkLayer();
             q.cutout = layer != ChunkSectionLayer.SOLID;
             q.translucent = layer == ChunkSectionLayer.TRANSLUCENT;
-
             // Fabric colors are authored albedo. Continuity uses them for already-resolved overlay tint;
             // ordinary biome-tinted quads retain tintIndex and are multiplied by the world tint below.
             int sr = 0, sg = 0, sb = 0;
@@ -506,7 +499,7 @@ final class RtTerrainMesher {
                 resolveCoplanar(n);
             }
             for (int i = 0; i < n; i++) {
-                emit(pending.get(i));
+                queueOrEmit(pending.get(i));
             }
             pendingCount = 0;
         }
@@ -589,8 +582,8 @@ final class RtTerrainMesher {
             }
         }
 
-        /** Emit one resolved quad into its section bucket (2 triangles, corner UVs, per-prim records). */
-        private void emit(PendingQuad q) {
+        /** Emit an ordinary immutable terrain quad. POM changes only shader UV lookup. */
+        private void queueOrEmit(PendingQuad q) {
             // Recess translucent (glass / ice) faces slightly into their own block. Vanilla culls a glass
             // face that touches a full solid block, but KEEPS the one touching a non-occluding neighbour
             // (slabs / stairs) — which lands exactly coplanar with that neighbour's face and z-fights. A tiny
@@ -599,6 +592,11 @@ final class RtTerrainMesher {
                 offset(q, -TRANSLUCENT_INSET);
             }
             Geom g = q.translucent ? cur.translucent() : (q.cutout ? cur.cutout() : cur.opaque());
+            emitFlat(g, q);
+        }
+
+        /** Emit one ordinary resolved quad (2 triangles, corner UVs and per-primitive records). */
+        private static void emitFlat(Geom g, PendingQuad q) {
             int base = g.verts.size() / 3;
             for (int k = 0; k < 4; k++) {
                 g.verts.add(q.x[k]);
@@ -615,24 +613,245 @@ final class RtTerrainMesher {
             // Per-triangle corner UVs (primitive order matching the two triangles: 0,1,2 then 0,2,3).
             addTriUv(g, q.uv[0], q.uv[1], q.uv[2]);
             addTriUv(g, q.uv[0], q.uv[2], q.uv[3]);
-            FloatArrayList prim = g.prim;
             for (int t = 0; t < 2; t++) {
-                prim.add(q.nx);
-                prim.add(q.ny);
-                prim.add(q.nz);
-                // normal.w = block-light emission (0..1) + a +2 flag for non-SOLID layers, so the closest
-                // hit can opt SOLID terrain out of SSS (leaves/foliage keep it). See world.rchit.
-                prim.add(q.cutout ? q.emission + 2f : q.emission);
-                prim.add(q.tr);
-                prim.add(q.tg);
-                prim.add(q.tb);
-                prim.add(0f);
-                prim.add(Float.intBitsToFloat(q.materialId)); // TerrainPrim.materialId uint bits
-                prim.add(0f); // flags
-                prim.add(0f); // aux0
-                prim.add(0f); // aux1
-                g.ommSprites.add(q.sprite);
+                addPrim(g, q, q.nx, q.ny, q.nz, 0);
             }
+        }
+
+        /**
+         * Emit one flat, physically displaced square per height texel. Adjacent squares with different
+         * heights are joined by vertical walls, producing a closed pixel/voxel relief rather than a
+         * smoothly triangulated height field. Each square is two coplanar GPU triangles (unavoidable in
+         * a triangle BLAS), but they share one plane and normal so the diagonal is not visible.
+         */
+        private void emitDisplaced(Geom g, PendingQuad q, RtBlockMaterials.HeightField field,
+                                   float depth, int quality, boolean smoothing) {
+            // Texture resolution owns the square count. There is no automatic topology/memory downgrade:
+            // every eligible face uses the exact configured upper resolution.
+            long dimensions = configureDisplacedGrid(q, field, quality);
+            int cellsX = (int) (dimensions >>> 32);
+            int cellsY = (int) dimensions;
+            float[] qu = displacedUScratch;
+            float[] qv = displacedVScratch;
+            float[] localU = displacedLocalUScratch;
+            float[] localV = displacedLocalVScratch;
+            int cellCount = cellsX * cellsY;
+            float[] heights = heightScratch.length >= cellCount
+                    ? heightScratch : (heightScratch = new float[cellCount]);
+
+            float effectiveDepth = resolutionScaledDepth(depth, field.width(), field.height(), 1.0f, 1.0f);
+
+            // Estimate one cell's local-UV footprint. HeightField retains authored data up to 512x512,
+            // and this selects an area-filtered semantic mip only when the user explicitly requests a
+            // coarser mesh than the source texture.
+            float duDx = 0.5f * ((localU[1] - localU[0]) + (localU[2] - localU[3])) / cellsX;
+            float dvDx = 0.5f * ((localV[1] - localV[0]) + (localV[2] - localV[3])) / cellsX;
+            float duDy = 0.5f * ((localU[3] - localU[0]) + (localU[2] - localU[1])) / cellsY;
+            float dvDy = 0.5f * ((localV[3] - localV[0]) + (localV[2] - localV[1])) / cellsY;
+            float heightLod = field.meshLod(Math.abs(duDx) + Math.abs(duDy),
+                    Math.abs(dvDx) + Math.abs(dvDy));
+            for (int y = 0; y < cellsY; y++) {
+                float v = (y + 0.5f) / cellsY;
+                for (int x = 0; x < cellsX; x++) {
+                    float u = (x + 0.5f) / cellsX;
+                    float sampleU = bilerp(localU, u, v);
+                    float sampleV = bilerp(localV, u, v);
+                    heights[y * cellsX + x] = field.displacementLod(
+                            sampleU, sampleV, heightLod, smoothing) * effectiveDepth;
+                }
+            }
+
+            if (cellsX == 1 && cellsY == 1) {
+                float h = heights[0];
+                addMicroQuad(g, q, qu, qv,
+                        0.0f, 0.0f, h, 1.0f, 0.0f, h,
+                        1.0f, 1.0f, h, 0.0f, 1.0f, h, true, false);
+                return;
+            }
+
+            // The lowest authored height is anchored to the original block face. The backing plane
+            // therefore seals the block at its real boundary instead of sitting half a relief-depth
+            // inside it (the old recessed backing became the large false mirror/void rectangles).
+            float baseHeight = -Math.max(1.0e-7f, effectiveDepth / 2048.0f);
+            // Preserve a one-byte LabPBR height transition while ignoring only float noise. This keeps
+            // the texel columns closed without inventing walls between numerically identical samples.
+            final float wallEpsilon = Math.max(1.0e-8f, effectiveDepth / 510.0f);
+
+            addMicroQuad(g, q, qu, qv,
+                    0.0f, 0.0f, baseHeight, 1.0f, 0.0f, baseHeight,
+                    1.0f, 1.0f, baseHeight, 0.0f, 1.0f, baseHeight, true, true);
+            for (int y = 0; y < cellsY; y++) {
+                float v0 = y / (float) cellsY;
+                float v1 = (y + 1) / (float) cellsY;
+                for (int x = 0; x < cellsX; x++) {
+                    float u0 = x / (float) cellsX;
+                    float u1 = (x + 1) / (float) cellsX;
+                    float h = heights[y * cellsX + x];
+
+                    // Flat top: visually one protruding square, despite its two coplanar BLAS triangles.
+                    addMicroQuad(g, q, qu, qv,
+                            u0, v0, h, u1, v0, h, u1, v1, h, u0, v1, h, true, false);
+
+                    if (x + 1 < cellsX) {
+                        float right = heights[y * cellsX + x + 1];
+                        if (Math.abs(h - right) > wallEpsilon) {
+                            addMicroQuad(g, q, qu, qv,
+                                    u1, v0, h, u1, v1, h,
+                                    u1, v1, right, u1, v0, right, false, true);
+                        }
+                    } else if (Math.abs(h - baseHeight) > wallEpsilon) {
+                        addMicroQuad(g, q, qu, qv,
+                                u1, v0, h, u1, v1, h,
+                                u1, v1, baseHeight, u1, v0, baseHeight, false, true);
+                    }
+                    if (x == 0 && Math.abs(h - baseHeight) > wallEpsilon) {
+                        addMicroQuad(g, q, qu, qv,
+                                u0, v1, h, u0, v0, h,
+                                u0, v0, baseHeight, u0, v1, baseHeight, false, true);
+                    }
+
+                    if (y + 1 < cellsY) {
+                        float below = heights[(y + 1) * cellsX + x];
+                        if (Math.abs(h - below) > wallEpsilon) {
+                            addMicroQuad(g, q, qu, qv,
+                                    u1, v1, h, u0, v1, h,
+                                    u0, v1, below, u1, v1, below, false, true);
+                        }
+                    } else if (Math.abs(h - baseHeight) > wallEpsilon) {
+                        addMicroQuad(g, q, qu, qv,
+                                u1, v1, h, u0, v1, h,
+                                u0, v1, baseHeight, u1, v1, baseHeight, false, true);
+                    }
+                    if (y == 0 && Math.abs(h - baseHeight) > wallEpsilon) {
+                        addMicroQuad(g, q, qu, qv,
+                                u0, v0, h, u1, v0, h,
+                                u1, v0, baseHeight, u0, v0, baseHeight, false, true);
+                    }
+                }
+            }
+        }
+
+        /**
+         * Populate the reusable atlas/local-UV arrays and return the exact emitted cell dimensions packed
+         * as {@code cellsX << 32 | cellsY}. Used by both section preflight and the emitter, preventing a
+         * disagreement that could reintroduce traversal-order fallback.
+         */
+        private long configureDisplacedGrid(PendingQuad q, RtBlockMaterials.HeightField field, int quality) {
+            int resolutionCap = Math.clamp(quality, 1, 512);
+            float[] qu = displacedUScratch;
+            float[] qv = displacedVScratch;
+            float[] localU = displacedLocalUScratch;
+            float[] localV = displacedLocalVScratch;
+            float invDu = 1.0f / Math.max(1.0e-12f, q.sprite.getU1() - q.sprite.getU0());
+            float invDv = 1.0f / Math.max(1.0e-12f, q.sprite.getV1() - q.sprite.getV0());
+            for (int i = 0; i < 4; i++) {
+                qu[i] = Float.intBitsToFloat((int) (q.uv[i] >>> 32));
+                qv[i] = Float.intBitsToFloat((int) q.uv[i]);
+                localU[i] = Math.max(0.0f, Math.min(1.0f,
+                        (qu[i] - q.sprite.getU0()) * invDu));
+                localV[i] = Math.max(0.0f, Math.min(1.0f,
+                        (qv[i] - q.sprite.getV0()) * invDv));
+            }
+
+            float sourceTexelsX = 0.5f * (texelDistance(localU[0], localV[0], localU[1], localV[1],
+                    field.width(), field.height())
+                    + texelDistance(localU[3], localV[3], localU[2], localV[2],
+                    field.width(), field.height()));
+            float sourceTexelsY = 0.5f * (texelDistance(localU[0], localV[0], localU[3], localV[3],
+                    field.width(), field.height())
+                    + texelDistance(localU[1], localV[1], localU[2], localV[2],
+                    field.width(), field.height()));
+            int cellsX = Math.max(1, Math.min(resolutionCap, Math.round(sourceTexelsX)));
+            int cellsY = Math.max(1, Math.min(resolutionCap, Math.round(sourceTexelsY)));
+            return ((long) cellsX << 32) | (cellsY & 0xFFFFFFFFL);
+        }
+
+        private static float texelDistance(float u0, float v0, float u1, float v1,
+                                           int textureWidth, int textureHeight) {
+            float du = (u1 - u0) * textureWidth;
+            float dv = (v1 - v0) * textureHeight;
+            return (float) Math.sqrt(du * du + dv * dv);
+        }
+
+        private static void addMicroQuad(Geom g, PendingQuad q, float[] qu, float[] qv,
+                                         float u0, float v0, float h0,
+                                         float u1, float v1, float h1,
+                                         float u2, float v2, float h2,
+                                         float u3, float v3, float h3,
+                                         boolean top, boolean closure) {
+            float p0x = bilerp(q.x, u0, v0) + q.nx * h0;
+            float p0y = bilerp(q.y, u0, v0) + q.ny * h0;
+            float p0z = bilerp(q.z, u0, v0) + q.nz * h0;
+            float p1x = bilerp(q.x, u1, v1) + q.nx * h1;
+            float p1y = bilerp(q.y, u1, v1) + q.ny * h1;
+            float p1z = bilerp(q.z, u1, v1) + q.nz * h1;
+            float p2x = bilerp(q.x, u2, v2) + q.nx * h2;
+            float p2y = bilerp(q.y, u2, v2) + q.ny * h2;
+            float p2z = bilerp(q.z, u2, v2) + q.nz * h2;
+            float p3x = bilerp(q.x, u3, v3) + q.nx * h3;
+            float p3y = bilerp(q.y, u3, v3) + q.ny * h3;
+            float p3z = bilerp(q.z, u3, v3) + q.nz * h3;
+
+            float nx = q.nx, ny = q.ny, nz = q.nz;
+            if (!top) {
+                float e1x = p1x - p0x, e1y = p1y - p0y, e1z = p1z - p0z;
+                float e2x = p2x - p0x, e2y = p2y - p0y, e2z = p2z - p0z;
+                nx = e1y * e2z - e1z * e2y;
+                ny = e1z * e2x - e1x * e2z;
+                nz = e1x * e2y - e1y * e2x;
+                float length = (float) Math.sqrt(nx * nx + ny * ny + nz * nz);
+                if (length <= 1.0e-8f) {
+                    return;
+                }
+                nx /= length;
+                ny /= length;
+                nz /= length;
+            }
+
+            int base = g.verts.size() / 3;
+            g.verts.add(p0x); g.verts.add(p0y); g.verts.add(p0z);
+            g.verts.add(p1x); g.verts.add(p1y); g.verts.add(p1z);
+            g.verts.add(p2x); g.verts.add(p2y); g.verts.add(p2z);
+            g.verts.add(p3x); g.verts.add(p3y); g.verts.add(p3z);
+            g.idx.add(base); g.idx.add(base + 1); g.idx.add(base + 2);
+            g.idx.add(base); g.idx.add(base + 2); g.idx.add(base + 3);
+
+            float t0u = bilerp(qu, u0, v0), t0v = bilerp(qv, u0, v0);
+            float t1u = bilerp(qu, u1, v1), t1v = bilerp(qv, u1, v1);
+            float t2u = bilerp(qu, u2, v2), t2v = bilerp(qv, u2, v2);
+            float t3u = bilerp(qu, u3, v3), t3v = bilerp(qv, u3, v3);
+            addTriUv(g, t0u, t0v, t1u, t1v, t2u, t2v);
+            addTriUv(g, t0u, t0v, t2u, t2v, t3u, t3v);
+            int flags = PRIM_FLAG_MESH_DISPLACED | (closure ? PRIM_FLAG_MESH_CLOSURE : 0);
+            addPrim(g, q, nx, ny, nz, flags);
+            addPrim(g, q, nx, ny, nz, flags);
+        }
+
+        private static void addPrim(Geom g, PendingQuad q, float nx, float ny, float nz, int flags) {
+            FloatArrayList prim = g.prim;
+            prim.add(nx);
+            prim.add(ny);
+            prim.add(nz);
+            // normal.w = block-light emission (0..1) + a +2 flag for non-SOLID layers, so the closest
+            // hit can opt SOLID terrain out of SSS (leaves/foliage keep it). See world.rchit.
+            prim.add(q.cutout ? q.emission + 2f : q.emission);
+            prim.add(q.tr);
+            prim.add(q.tg);
+            prim.add(q.tb);
+            prim.add(0f);
+            prim.add(Float.intBitsToFloat(q.materialId));
+            prim.add(Float.intBitsToFloat(flags));
+            prim.add(0f);
+            prim.add(0f);
+            g.ommSprites.add(q.sprite);
+        }
+
+        private static float lerp(float a, float b, float t) {
+            return a + (b - a) * t;
+        }
+
+        private static float bilerp(float[] values, float u, float v) {
+            return lerp(lerp(values[0], values[1], u), lerp(values[3], values[2], u), v);
         }
     }
 
@@ -647,6 +866,29 @@ final class RtTerrainMesher {
         float tr, tg, tb, emission;
         int materialId;
         TextureAtlasSprite sprite;
+
+        void copyFrom(PendingQuad source) {
+            System.arraycopy(source.x, 0, x, 0, 4);
+            System.arraycopy(source.y, 0, y, 0, 4);
+            System.arraycopy(source.z, 0, z, 0, 4);
+            System.arraycopy(source.uv, 0, uv, 0, 4);
+            nx = source.nx;
+            ny = source.ny;
+            nz = source.nz;
+            cutout = source.cutout;
+            translucent = source.translucent;
+            tinted = source.tinted;
+            tr = source.tr;
+            tg = source.tg;
+            tb = source.tb;
+            emission = source.emission;
+            materialId = source.materialId;
+            sprite = source.sprite;
+        }
+
+        void releaseReferences() {
+            sprite = null;
+        }
     }
 
     /** Append one triangle's 3 corner UVs (6 floats) from packed UVPairs. UVPair packs u in the high 32

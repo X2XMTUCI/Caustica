@@ -141,7 +141,11 @@ public final class RtEntityCollector implements SubmitNodeCollector {
     public <S> void submitModel(Model<? super S> model, S state, PoseStack poseStack, RenderType renderType,
                                 int lightCoords, int overlayCoords, int tintedColor, TextureAtlasSprite sprite,
                                 int outlineColor, ModelFeatureRenderer.CrumblingOverlay crumblingOverlay) {
-        if (capture == null) {
+        // Enchantment glint is an animated raster overlay submitted as a second copy of the same model.
+        // Capturing that copy as opaque RT geometry makes it win the coplanar BLAS hit and replace the
+        // armor/item albedo with the dark purple glint texture. The base model submission already carries
+        // all physical geometry, PBR, motion and shadows, so service glint passes must not enter the BLAS.
+        if (capture == null || isEnchantmentGlint(renderType)) {
             return;
         }
         if (outlineColor != 0) {
@@ -349,6 +353,14 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         RenderPipeline pipeline = ((RenderSetupAccessor) setup).caustica$pipeline();
         ColorTargetState cts = pipeline.getColorTargetState();
         return cts != null && cts.blendFunction().isPresent();
+    }
+
+    /** Raster-only animated foil passes; never physical geometry. Identity is stable for these singletons. */
+    private static boolean isEnchantmentGlint(RenderType renderType) {
+        return renderType == RenderTypes.armorEntityGlint()
+                || renderType == RenderTypes.entityGlint()
+                || renderType == RenderTypes.glint()
+                || renderType == RenderTypes.glintTranslucent();
     }
 
     /** Classify one vanilla submission for the entity BLAS geometry split. */

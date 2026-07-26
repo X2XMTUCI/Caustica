@@ -40,6 +40,20 @@ public final class RtVideoOptions {
             entities(),
             particles(),
             waterWaves(),
+            parallaxEnabled(),
+            parallaxStrength(),
+            parallaxSmoothing(),
+            parallaxDistance(),
+            fogEnabled(),
+            fogDensity(),
+            fogHeightFalloff(),
+            fogAnisotropy(),
+            fogDistance(),
+            proceduralClouds(),
+            motionBlurEnabled(),
+            motionBlurStrength(),
+            bloomEnabled(),
+            bloomStrength(),
             dlssQuality(),
             hdrEnabled(),
             hdrPaperWhite(),
@@ -122,6 +136,123 @@ public final class RtVideoOptions {
 
     private static OptionInstance<Boolean> waterWaves() {
         return bool("caustica.options.rt.waterWaves", CausticaConfig.Rt.Composite.WATER_WAVES);
+    }
+
+    private static OptionInstance<Boolean> parallaxEnabled() {
+        return bool("caustica.options.rt.parallax", CausticaConfig.Rt.Composite.PARALLAX_ENABLED);
+    }
+
+    private static OptionInstance<Integer> parallaxStrength() {
+        FloatSetting setting = CausticaConfig.Rt.Composite.PARALLAX_STRENGTH;
+        return new OptionInstance<>(
+            "caustica.options.rt.parallaxStrength",
+            OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.parallaxStrength.tooltip")),
+            (caption, percent) -> Options.genericValueLabel(caption, Component.literal(percent + "%")),
+            new OptionInstance.IntRange(0, 400),
+            Math.clamp(Math.round(setting.value() * 100.0f), 0, 400),
+            percent -> setting.set(percent / 100.0f));
+    }
+
+    private static OptionInstance<Boolean> parallaxSmoothing() {
+        return bool("caustica.options.rt.parallaxSmoothing",
+                CausticaConfig.Rt.Composite.PARALLAX_SMOOTHING);
+    }
+
+    private static OptionInstance<Integer> parallaxDistance() {
+        FloatSetting setting = CausticaConfig.Rt.Composite.PARALLAX_DISTANCE;
+        return new OptionInstance<>(
+            "caustica.options.rt.parallaxDistance",
+            OptionInstance.cachedConstantTooltip(
+                    Component.translatable("caustica.options.rt.parallaxDistance.tooltip")),
+            (caption, blocks) -> Options.genericValueLabel(caption, Component.literal(blocks + " blocks")),
+            new OptionInstance.IntRange(16, 256),
+            Math.clamp(Math.round(setting.value()), 16, 256),
+            blocks -> setting.set(blocks.floatValue()));
+    }
+
+    private static OptionInstance<Boolean> fogEnabled() {
+        return bool("caustica.options.rt.volumetricFog", CausticaConfig.Rt.Fog.ENABLED);
+    }
+
+    private static OptionInstance<Integer> fogDensity() {
+        FloatSetting setting = CausticaConfig.Rt.Fog.DENSITY;
+        return new OptionInstance<>(
+            "caustica.options.rt.fogDensity",
+            OptionInstance.cachedConstantTooltip(
+                    Component.translatable("caustica.options.rt.fogDensity.tooltip")),
+            (caption, percent) -> Options.genericValueLabel(caption, Component.literal(percent + "%")),
+            new OptionInstance.IntRange(0, 100),
+            Math.clamp(Math.round(setting.value() * 2000.0f), 0, 100),
+            percent -> setting.set(percent / 2000.0f));
+    }
+
+    private static OptionInstance<Integer> fogHeightFalloff() {
+        FloatSetting setting = CausticaConfig.Rt.Fog.HEIGHT_FALLOFF;
+        return new OptionInstance<>(
+            "caustica.options.rt.fogHeightFalloff",
+            OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.fogHeightFalloff.tooltip")),
+            (caption, percent) -> Options.genericValueLabel(caption, Component.literal(percent + "%")),
+            new OptionInstance.IntRange(0, 100),
+            Math.clamp(Math.round(setting.value() * 2000.0f), 0, 100),
+            percent -> setting.set(percent / 2000.0f));
+    }
+
+    private static OptionInstance<Integer> fogAnisotropy() {
+        FloatSetting setting = CausticaConfig.Rt.Fog.ANISOTROPY;
+        return new OptionInstance<>(
+            "caustica.options.rt.fogAnisotropy",
+            OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.fogAnisotropy.tooltip")),
+            (caption, percent) -> Options.genericValueLabel(caption, Component.literal(percent + "%")),
+            new OptionInstance.IntRange(0, 90),
+            Math.clamp(Math.round(setting.value() * 100.0f), 0, 90),
+            percent -> setting.set(percent / 100.0f));
+    }
+
+    private static OptionInstance<Integer> fogDistance() {
+        FloatSetting setting = CausticaConfig.Rt.Fog.MAX_DISTANCE;
+        return new OptionInstance<>(
+            "caustica.options.rt.fogDistance",
+            OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.fogDistance.tooltip")),
+            (caption, blocks) -> Options.genericValueLabel(caption, Component.literal(blocks + " blocks")),
+            new OptionInstance.IntRange(16, 256),
+            Math.clamp(Math.round(setting.value()), 16, 256),
+            blocks -> setting.set(blocks.floatValue()));
+    }
+
+    private static OptionInstance<Boolean> motionBlurEnabled() {
+        return bool("caustica.options.rt.motionBlur", CausticaConfig.Rt.Post.MOTION_BLUR_ENABLED);
+    }
+
+    private static OptionInstance<Boolean> proceduralClouds() {
+        return bool("caustica.options.rt.proceduralClouds", CausticaConfig.Rt.Clouds.ENABLED);
+    }
+
+    private static OptionInstance<Integer> motionBlurStrength() {
+        FloatSetting setting = CausticaConfig.Rt.Post.MOTION_BLUR_STRENGTH;
+        return new OptionInstance<>(
+            "caustica.options.rt.motionBlurStrength",
+            OptionInstance.cachedConstantTooltip(
+                    Component.translatable("caustica.options.rt.motionBlurStrength.tooltip")),
+            (caption, percent) -> Options.genericValueLabel(caption, Component.literal(percent + "%")),
+            new OptionInstance.IntRange(0, 100),
+            Math.clamp(Math.round(setting.value() * 100.0f), 0, 100),
+            percent -> setting.set(percent / 100.0f));
+    }
+
+    private static OptionInstance<Boolean> bloomEnabled() {
+        return bool("caustica.options.rt.bloom", CausticaConfig.Rt.Post.BLOOM_ENABLED);
+    }
+
+    private static OptionInstance<Integer> bloomStrength() {
+        FloatSetting setting = CausticaConfig.Rt.Post.BLOOM_STRENGTH;
+        return new OptionInstance<>(
+            "caustica.options.rt.bloomStrength",
+            OptionInstance.cachedConstantTooltip(
+                    Component.translatable("caustica.options.rt.bloomStrength.tooltip")),
+            (caption, percent) -> Options.genericValueLabel(caption, Component.literal(percent + "%")),
+            new OptionInstance.IntRange(0, 100),
+            Math.clamp(Math.round(setting.value() * 100.0f), 0, 100),
+            percent -> setting.set(percent / 100.0f));
     }
 
     // NVSDK_NGX_PerfQuality_Value, ordered performance -> quality for the slider. Per NVIDIA's DLSS-RR

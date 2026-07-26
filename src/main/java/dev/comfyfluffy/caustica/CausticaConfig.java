@@ -56,7 +56,15 @@ public final class CausticaConfig {
     public static void ensureRegistered() {
         @SuppressWarnings("unused")
         Object[] touch = {
-            Rt.ENABLED, Rt.Composite.SPP, Rt.Composite.MAX_BOUNCES, Rt.Terrain.ASYNC_DISPATCH_PER_PASS, Rt.Omm.ENABLED,
+            Rt.ENABLED, Rt.Composite.SPP, Rt.Composite.MAX_BOUNCES, Rt.Composite.PARALLAX_ENABLED,
+            Rt.Composite.PARALLAX_STRENGTH, Rt.Composite.PARALLAX_SMOOTHING,
+            Rt.Composite.PARALLAX_DISTANCE,
+            Rt.Fog.ENABLED, Rt.Fog.DENSITY, Rt.Fog.HEIGHT_FALLOFF, Rt.Fog.ANISOTROPY, Rt.Fog.MAX_DISTANCE,
+            Rt.Post.MOTION_BLUR_ENABLED, Rt.Post.MOTION_BLUR_STRENGTH,
+            Rt.Post.BLOOM_ENABLED, Rt.Post.BLOOM_STRENGTH,
+            Rt.Clouds.ENABLED,
+            Rt.Terrain.ASYNC_DISPATCH_PER_PASS,
+            Rt.Omm.ENABLED,
             Rt.Entities.ENABLED, Rt.Entities.GLOW_ENABLED, Rt.EntityTextures.MAX_TEXTURES, Rt.DlssRr.ENABLED, Rt.Fg.ENABLED,
             Rt.Reflex.ENABLED, Rt.Exposure.MODE, Rt.FrameStats.ENABLED,
             Rt.Hdr.ENABLED, Ngx.PATH,
@@ -88,7 +96,19 @@ public final class CausticaConfig {
         FILE.setComment("terrain",
                 " Render-thread terrain work is bounded by dispatch/result counts per streaming pass.\n"
                         + " Buffer fill and BLAS/OMM preparation run on workers. max-inflight-sections bounds\n"
-                        + " the complete snapshot -> worker -> GPU build -> publication lifecycle.");
+                        + " the complete snapshot -> worker -> GPU build -> publication lifecycle.\n"
+                        + " Parallax is shader-only and never changes terrain topology or streaming.");
+        FILE.setComment("parallax",
+                " Shader-only parallax occlusion mapping from the LabPBR _n alpha height channel.\n"
+                        + " strength is a 0.0-4.0 multiplier; no extra triangles or BLAS rebuilds.");
+        FILE.setComment("volumetric-fog",
+                " Stable deterministic height fog. In-scattering is path-traced against scene occlusion,\n"
+                        + " and primary-view extinction is masked by the same celestial visibility, so fog\n"
+                        + " disappears inside volumes that receive no direct sun/moon light.");
+        FILE.setComment("post-processing",
+                " HDR-linear motion blur and bloom, applied before the SDR/HDR display transform.");
+        FILE.setComment("procedural-clouds",
+                " Ray-marched volumetric cloud layer generated entirely in the sky miss shader.");
         FILE.setComment("frame-generation",
                 " DLSS Frame Generation. Default off; gated additionally by hardware/driver availability.\n"
                         + " multi-frame-count: frames generated per rendered frame (1 = 2x, 2 = 3x, ...), clamped\n"
@@ -96,14 +116,6 @@ public final class CausticaConfig {
         FILE.setComment("reflex",
                 " NVIDIA Reflex (VK_NV_low_latency2). Default off; gated additionally by device support.\n"
                         + " minimum-interval-us: 0 = no framerate cap (Reflex just paces submission).");
-        FILE.setComment("lights",
-                " RIS direct lighting from block emitters (torches, glowstone, lava, ...): per diffuse\n"
-                        + " vertex, resample ris-candidates power-weighted proposals and spend one shadow ray on\n"
-                        + " the survivor. ris-candidates = 0 disables it entirely (emitters just gather on direct\n"
-                        + " hit, same as with no NEE). Power-weighted sampling and the local per-section light\n"
-                        + " grid are always active whenever RIS is on. min-fill-ratio drops emissive footprints\n"
-                        + " below that fraction of their bounding rectangle (speckle/sparse crossed planes), so\n"
-                        + " only reasonably compact glows become lights. stats/dump/dump-radius are debug logging.");
         FILE.setComment("hdr",
                 " HDR display output (ST.2084/PQ). When enabled the swapchain is created in PQ automatically\n"
                         + " (falls back to SDR if the surface doesn't advertise it). paper-white-nits / peak-nits\n"
@@ -537,6 +549,14 @@ public final class CausticaConfig {
                     clampedInt("caustica.rt.maxBounces", "composite.max-bounces", 4, 2, 8);
             public static final BooleanSetting WATER_WAVES =
                     bool("caustica.rt.waterWaves", "composite.water-waves", true);
+            public static final BooleanSetting PARALLAX_ENABLED =
+                    bool("caustica.rt.parallax", "parallax.enabled", true);
+            public static final FloatSetting PARALLAX_STRENGTH =
+                    clampedFloat("caustica.rt.parallaxStrength", "parallax.strength", 1.0f, 0.0f, 4.0f);
+            public static final BooleanSetting PARALLAX_SMOOTHING =
+                    bool("caustica.rt.parallaxSmoothing", "parallax.smoothing", true);
+            public static final FloatSetting PARALLAX_DISTANCE =
+                    clampedFloat("caustica.rt.parallaxDistance", "parallax.distance", 64.0f, 16.0f, 256.0f);
             public static final FloatSetting SUN_ANGULAR_RADIUS =
                     radians("caustica.rt.sunAngularRadius", "composite.sun-angular-radius-deg", 0.6f);
             public static final FloatSetting MOON_ANGULAR_RADIUS =
@@ -549,6 +569,52 @@ public final class CausticaConfig {
                     finiteFloat("caustica.rt.jitterSignY", "composite.jitter-sign-y", -1.0f);
 
             private Composite() {
+            }
+        }
+
+        public static final class Fog {
+            public static final BooleanSetting ENABLED =
+                    bool("caustica.rt.volumetricFog", "volumetric-fog.enabled", true);
+            public static final FloatSetting DENSITY =
+                    clampedFloat("caustica.rt.fogDensity", "volumetric-fog.density", 0.012f, 0.0f, 0.05f);
+            public static final FloatSetting HEIGHT_FALLOFF =
+                    clampedFloat("caustica.rt.fogHeightFalloff",
+                            "volumetric-fog.height-falloff", 0.015f, 0.0f, 0.05f);
+            public static final FloatSetting ANISOTROPY =
+                    clampedFloat("caustica.rt.fogAnisotropy",
+                            "volumetric-fog.anisotropy", 0.6f, 0.0f, 0.9f);
+            public static final FloatSetting MAX_DISTANCE =
+                    clampedFloat("caustica.rt.fogMaxDistance",
+                            "volumetric-fog.max-distance", 128.0f, 16.0f, 256.0f);
+            public static final FloatSetting BASE_HEIGHT =
+                    clampedFloat("caustica.rt.fogBaseHeight",
+                            "volumetric-fog.base-height", 64.0f, -64.0f, 320.0f);
+
+            private Fog() {
+            }
+        }
+
+        public static final class Post {
+            public static final BooleanSetting MOTION_BLUR_ENABLED =
+                    bool("caustica.rt.motionBlur", "post-processing.motion-blur.enabled", true);
+            public static final FloatSetting MOTION_BLUR_STRENGTH =
+                    clampedFloat("caustica.rt.motionBlurStrength",
+                            "post-processing.motion-blur.strength", 0.35f, 0.0f, 1.0f);
+            public static final BooleanSetting BLOOM_ENABLED =
+                    bool("caustica.rt.bloom", "post-processing.bloom.enabled", true);
+            public static final FloatSetting BLOOM_STRENGTH =
+                    clampedFloat("caustica.rt.bloomStrength",
+                            "post-processing.bloom.strength", 0.25f, 0.0f, 1.0f);
+
+            private Post() {
+            }
+        }
+
+        public static final class Clouds {
+            public static final BooleanSetting ENABLED =
+                    bool("caustica.rt.proceduralClouds", "procedural-clouds.enabled", true);
+
+            private Clouds() {
             }
         }
 
@@ -565,25 +631,7 @@ public final class CausticaConfig {
                     intAtLeast("caustica.rt.sectionTableInitialCapacity", "terrain.section-table-initial-capacity", 512, 1);
             public static final IntSetting REBASE_DISTANCE_BLOCKS =
                     intAtLeast("caustica.rt.rebaseDistanceBlocks", "terrain.rebase-distance-blocks", 128, 0);
-            public static final BooleanSetting BLAS_COMPACTION =
-                    bool("caustica.rt.blasCompaction", "terrain.blas-compaction", true);
-
             private Terrain() {
-            }
-        }
-
-        /** RIS block-emitter lights. {@code ris-candidates = 0} disables everything. */
-        public static final class Lights {
-            public static final IntSetting RIS_CANDIDATES =
-                    intAtLeast("caustica.rt.risCandidates", "lights.ris-candidates", 8, 0);
-            public static final FloatSetting MIN_FILL_RATIO =
-                    finiteFloat("caustica.rt.lightMinFillRatio", "lights.min-fill-ratio", 0.25f);
-            public static final BooleanSetting STATS = bool("caustica.rt.lightStats", "lights.stats", false);
-            public static final BooleanSetting DUMP = bool("caustica.rt.lightDump", "lights.dump", false);
-            public static final IntSetting DUMP_RADIUS =
-                    intAtLeast("caustica.rt.lightDumpRadius", "lights.dump-radius", 12, 1);
-
-            private Lights() {
             }
         }
 
@@ -618,8 +666,8 @@ public final class CausticaConfig {
                     intAtLeast("caustica.rt.beViewChunks", "entities.block-entities.view-chunks", 8, 0);
             public static final IntSetting BE_BUILDS_PER_FRAME =
                     intAtLeast("caustica.rt.beBuildsPerFrame", "entities.block-entities.builds-per-frame", 64, 0);
-            public static final BooleanSetting REFIT_ENABLED =
-                    bool("caustica.rt.entityRefit", "entities.refit.enabled", true);
+            public static final IntSetting REFIT_REBUILD_INTERVAL =
+                    intAtLeast("caustica.rt.refitRebuildInterval", "entities.refit.rebuild-interval", 120, 1);
 
             private Entities() {
             }
@@ -701,7 +749,7 @@ public final class CausticaConfig {
             public static final FloatSetting MIN_EV =
                     finiteFloat("caustica.rt.exposure.minEv", "exposure.min-ev", -1.5f);
             public static final FloatSetting MAX_EV =
-                    finiteFloat("caustica.rt.exposure.maxEv", "exposure.max-ev", 4.0f);
+                    finiteFloat("caustica.rt.exposure.maxEv", "exposure.max-ev", 3.0f);
             public static final FloatSetting ADAPT_UP =
                     exposureScale("caustica.rt.exposure.adaptUp", "exposure.adapt-up", 0.12f);
             public static final FloatSetting ADAPT_DOWN =

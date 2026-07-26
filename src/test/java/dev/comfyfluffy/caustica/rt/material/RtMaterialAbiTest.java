@@ -11,6 +11,7 @@ final class RtMaterialAbiTest {
     void acceptsMatchingTriangleRecords() {
         assertEquals(2, RtMaterialAbi.checkedPrimitiveCount(24));
         assertDoesNotThrow(() -> RtMaterialAbi.requireTriangleParity(24, 6));
+        assertDoesNotThrow(() -> RtMaterialAbi.requireTerrainParity(24, 6, 12));
     }
 
     @Test
@@ -18,5 +19,6 @@ final class RtMaterialAbiTest {
         assertThrows(IllegalArgumentException.class, () -> RtMaterialAbi.checkedPrimitiveCount(13));
         assertThrows(IllegalArgumentException.class, () -> RtMaterialAbi.requireTriangleParity(24, 3));
         assertThrows(IllegalArgumentException.class, () -> RtMaterialAbi.requireTriangleParity(12, 4));
+        assertThrows(IllegalArgumentException.class, () -> RtMaterialAbi.requireTerrainParity(24, 6, 10));
     }
 }

@@ -24,6 +24,8 @@ changes while the renderer is being built.
 - HDR output
 - Dynamic entity rendering in the ray-traced scene
 - LabPBR-style material support
+- LabPBR height-map parallax occlusion mapping
+- Path-traced volumetric fog with stochastic medium scattering
 - OMM (Opacity Micro-Map) + SER (Shader Execution Reordering) optimizations
 
 ## Requirements
