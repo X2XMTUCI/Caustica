@@ -44,7 +44,7 @@ public final class RtDistantHorizonsTerrain {
     /** Keep each DH section wholly outside vanilla terrain to avoid overlap at the transition. */
     private static final int VANILLA_SEAM_GUARD_BLOCKS = 64;
     private static final int CHUNK_BLOCKS = 16;
-    private static final int MAX_PROXY_DISTANCE_CHUNKS = 256;
+    private static final int MAX_PROXY_DISTANCE_CHUNKS = 512;
     private static final long REFRESH_NANOS = 8_000_000_000L;
     private static final long QUALITY_REFRESH_NANOS = 1_000_000_000L;
     private static final long QUALITY_SETTLE_NANOS = 15_000_000_000L;
@@ -137,6 +137,7 @@ public final class RtDistantHorizonsTerrain {
 
     public void frame(RtContext ctx, int rebaseX, int rebaseY, int rebaseZ) {
         Minecraft minecraft = Minecraft.getInstance();
+        DistantHorizonsCompat.tickOptionalSources();
         Object newWorld = minecraft.level;
         if (DistantHorizonsCompat.enabled() && newWorld != null
                 && manualRefreshRequested.getAndSet(false)) {

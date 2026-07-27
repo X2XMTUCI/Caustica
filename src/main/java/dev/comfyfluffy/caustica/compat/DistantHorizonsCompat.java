@@ -59,7 +59,7 @@ public final class DistantHorizonsCompat {
      */
     public static void captureLodBuffers(long pos, Object level, List<ByteBuffer> opaque,
                                          List<ByteBuffer> transparent) {
-        if (!enabled()) return;
+        if (!LOADED) return;
         ensureCurrentWorldScope();
         try {
             LodMesh previous = LOD_MESHES.get(pos);
@@ -105,6 +105,11 @@ public final class DistantHorizonsCompat {
 
     public static List<LodMesh> lodMeshesSnapshot() {
         if (!enabled()) return List.of();
+        List<LodMesh> voxy = VoxyCompat.meshes();
+        // Never render two independently simplified copies of the same horizon. Prefer Voxy while it has
+        // an active snapshot, then fall back to DH during Voxy bootstrap or when only DH is installed.
+        if (!voxy.isEmpty()) return voxy;
+        if (!LOADED) return List.of();
         ensureCurrentWorldScope();
         try {
             Set<Long> active = RenderApi.INSTANCE.activeLodPositions();
@@ -164,6 +169,7 @@ public final class DistantHorizonsCompat {
 
     /** Drop captured buffers when disabling the integration or performing final shutdown. */
     public static void clearCapturedLods() {
+        VoxyCompat.reset();
         synchronized (WORLD_SCOPE_LOCK) {
             if (!LOD_MESHES.isEmpty()) {
                 LOD_MESHES.clear();
@@ -176,8 +182,10 @@ public final class DistantHorizonsCompat {
     }
 
     public static long lodRevision() {
-        ensureCurrentWorldScope();
-        return LOD_REVISION.get();
+        if (LOADED) ensureCurrentWorldScope();
+        long dh = LOADED ? LOD_REVISION.get() : 0L;
+        long voxy = VoxyCompat.revision();
+        return dh ^ Long.rotateLeft(voxy, 29);
     }
 
     private static long quadByteCount(List<ByteBuffer> buffers) {
@@ -227,7 +235,12 @@ public final class DistantHorizonsCompat {
     }
 
     public static boolean enabled() {
-        return LOADED;
+        return LOADED || VoxyCompat.enabled();
+    }
+
+    /** Update optional providers on the render thread before the RT proxy observes their revision. */
+    public static void tickOptionalSources() {
+        VoxyCompat.tick();
     }
 
     /**
@@ -239,10 +252,12 @@ public final class DistantHorizonsCompat {
      */
     public static boolean reloadRenderDataCache() {
         if (!enabled()) return false;
+        boolean reloaded = VoxyCompat.reset();
+        if (!LOADED) return reloaded;
         try {
-            return ReloadApi.INSTANCE.clearRenderDataCache();
+            return ReloadApi.INSTANCE.clearRenderDataCache() || reloaded;
         } catch (Throwable ignored) {
-            return false;
+            return reloaded;
         }
     }
 
@@ -250,6 +265,14 @@ public final class DistantHorizonsCompat {
     /** Current DH horizontal quality. Changes are polled by the RT proxy to trigger immediate refinement. */
     public static LodQuality lodQuality() {
         if (!enabled()) return new LodQuality(0L, 16, 2, "UNKNOWN", "UNKNOWN");
+        if (!VoxyCompat.meshes().isEmpty() || !LOADED) {
+            int maxWidth = 1;
+            for (LodMesh mesh : VoxyCompat.meshes()) {
+                maxWidth = Math.max(maxWidth, mesh.dataPointWidth());
+            }
+            long signature = 0x564F585900000000L ^ maxWidth ^ ((long) VoxyCompat.renderDistanceChunks() << 16);
+            return new LodQuality(signature, maxWidth, 4, "VOXY_" + maxWidth, "DYNAMIC");
+        }
         try {
             return Api.INSTANCE.lodQuality();
         } catch (Throwable ignored) {
@@ -307,16 +330,18 @@ public final class DistantHorizonsCompat {
 
     public static int renderDistanceChunks() {
         if (!enabled()) return 0;
+        int voxyDistance = VoxyCompat.renderDistanceChunks();
+        if (!LOADED) return voxyDistance;
         try {
-            return Api.INSTANCE.renderDistanceChunks();
+            return Math.max(voxyDistance, Api.INSTANCE.renderDistanceChunks());
         } catch (Throwable ignored) {
-            return 0;
+            return voxyDistance;
         }
     }
 
     /** Vulkan image-view of DH's own depth target. The Minecraft main depth does not contain LOD depth. */
     public static long depthTextureView() {
-        if (!enabled()) return 0L;
+        if (!LOADED) return 0L;
         try {
             return RenderApi.INSTANCE.depthTextureView();
         } catch (Throwable ignored) {
@@ -326,7 +351,7 @@ public final class DistantHorizonsCompat {
 
     /** Copy DH's exact inverse projection/model-view matrix into {@code dest}. */
     public static boolean inverseViewProjection(Matrix4f dest) {
-        if (!enabled()) return false;
+        if (!LOADED) return false;
         try {
             return RenderApi.INSTANCE.inverseViewProjection(dest);
         } catch (Throwable ignored) {
