@@ -15,6 +15,7 @@ public struct WorldPushConstants {
     public uint64_t worldPushAddr;
     public uint64_t tableAddr;
     public uint64_t entityTableAddr;
+    public uint64_t dhTableAddr;
     public uint64_t materialTableAddr;
     public uint frameIndex;
     public uint debugView;
@@ -33,6 +34,10 @@ public struct WorldPush {
     public float3   camOffset;
     public uint64_t tableAddr;        // section table
     public uint     frameIndex;
+    // Keep the following matrix explicitly 16-byte aligned across Vulkan SDK Slang releases. Some
+    // standalone Slang builds otherwise reflect the implicit std430 tail padding after frameIndex as
+    // scalar layout and emit an invalid physical-storage-buffer offset.
+    public uint     frameMatrixPad;
     public float4x4 prevViewProj;
     public float3   camDelta;
     public uint     spp;
@@ -40,6 +45,8 @@ public struct WorldPush {
     public uint64_t entityTableAddr;  // entity geometry table
     public uint     flags;            // bit0 camera submerged, bit1 PBR, bit4 water waves, bit5 POM smoothing
     public uint     maxBounces;
+    public uint     sunVectorPad0;
+    public uint     sunVectorPad1;
     public float4   sunDir;           // xyz true sun direction, w dayFactor 0..1
     public float4   lightDir;         // xyz active NEE light dir, w square half-angle (rad)
     public float4   lightRadiance;    // xyz HDR light radiance, w star brightness
@@ -51,6 +58,9 @@ public struct WorldPush {
     public float4   waterAnchor;      // xy world-stable wave-domain anchor
     public float4x4 curViewProj;      // forward camera-relative view-projection
     public uint     breakCount;
+    public uint     breakingPad0;
+    public uint     breakingPad1;
+    public uint     breakingPad2;
     public BreakEntry breaking[8];    // Java capacity and breakCount serialization are generated from this
     public float4   parallaxParams;   // x relief depth, y path-traced height steps, z unused, w max distance
     public float4   fogParams;        // x density, y height falloff, z anisotropy, w max distance
@@ -100,6 +110,31 @@ public static const uint MATERIAL_OPAQUE = 0u;
 public static const uint MATERIAL_WATER = 1u;
 public static const uint MATERIAL_PARTICLE = 2u;
 public static const uint MATERIAL_GLASS = 3u;
+
+// Distant Horizons retains coarse geometry, vertex colours and a mini-material category, but no
+// original block sprite. The CPU importer stores these surface classes in TerrainPrim.tint.w.
+public static const uint DH_SURFACE_SOLID = 0u;
+public static const uint DH_SURFACE_WATER = 1u;
+public static const uint DH_SURFACE_GLASS = 2u;
+public static const uint DH_SURFACE_EMISSIVE = 3u;
+public static const uint DH_SURFACE_EMISSIVE_GLASS = 4u;
+
+public static const uint DH_MATERIAL_UNKNOWN = 0u;
+public static const uint DH_MATERIAL_LEAVES = 1u;
+public static const uint DH_MATERIAL_STONE = 2u;
+public static const uint DH_MATERIAL_WOOD = 3u;
+public static const uint DH_MATERIAL_METAL = 4u;
+public static const uint DH_MATERIAL_DIRT = 5u;
+public static const uint DH_MATERIAL_LAVA = 6u;
+public static const uint DH_MATERIAL_DEEPSLATE = 7u;
+public static const uint DH_MATERIAL_SNOW = 8u;
+public static const uint DH_MATERIAL_SAND = 9u;
+public static const uint DH_MATERIAL_TERRACOTTA = 10u;
+public static const uint DH_MATERIAL_NETHER_STONE = 11u;
+public static const uint DH_MATERIAL_WATER = 12u;
+public static const uint DH_MATERIAL_GRASS = 13u;
+public static const uint DH_MATERIAL_AIR = 14u;
+public static const uint DH_MATERIAL_ILLUMINATED = 15u;
 
 // Entity per-triangle record (48 B). The final lane mirrors TerrainPrim's integer material metadata.
 public struct Prim {
@@ -170,6 +205,7 @@ public struct EntityGeom {
 // TLAS instance-custom-index encoding + terrain geometry buckets (shared by rahit/rchit).
 public static const uint ENTITY_BIT = 0x800000u;
 public static const uint PARTICLE_BIT = 0x400000u; // particles share the entity cutout path
+public static const uint DH_INSTANCE_KIND = ENTITY_BIT | PARTICLE_BIT;
 public static const uint IDX_MASK = 0x3FFFFFu;     // low 22 bits = geom-table index
 public static const uint BUCKET_SOLID = 0u;
 public static const uint BUCKET_CUTOUT = 1u;
@@ -221,4 +257,16 @@ public float3 srgbToLinear(float3 c) {
     float3 hi = pow((c + 0.055) / 1.055, float3(2.4, 2.4, 2.4));
     float3 isHi = step(float3(0.04045, 0.04045, 0.04045), c);
     return lerp(lo, hi, isHi);
+}
+
+// Turn DH's baked transparent vertex colour into a stable optical filter. Saturation keeps stained
+// glass coloured even when the source alpha is low, while clear glass remains close to neutral.
+public float3 glassTransmissionFilter(float3 linearColor, float alpha) {
+    float3 color = max(linearColor, float3(0.0, 0.0, 0.0));
+    float hi = max(color.r, max(color.g, color.b));
+    float lo = min(color.r, min(color.g, color.b));
+    float saturation = hi > 1.0e-4 ? (hi - lo) / hi : 0.0;
+    float dyeStrength = clamp(max(alpha, saturation * 0.92), 0.0, 0.96);
+    return max(lerp(float3(1.0, 1.0, 1.0), color, dyeStrength),
+            float3(0.012, 0.012, 0.012));
 }

@@ -85,5 +85,8 @@
 	"caustica.options.rt.debugView.4": "Шероховатость",
 	"caustica.options.rt.debugView.5": "Движение",
 	"caustica.options.rt.debugView.6": "Зеркальность",
-	"caustica.options.rt.debugView.7": "Зеркальное движение"
+	"caustica.options.rt.debugView.7": "Зеркальное движение",
+	"caustica.options.rt.dhRefresh": "Перезагрузить чанки Distant Horizons",
+	"caustica.options.rt.dhRefresh.queued": "Перезагрузка Distant Horizons запущена",
+	"caustica.options.rt.dhRefresh.rtOnly": "Перезагрузка RT-прокси Caustica запущена"
 }

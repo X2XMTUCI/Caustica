@@ -406,8 +406,91 @@ float3 applyBreaking(float3 albedo, uint rayCone, float3 rayOrigin, float3 rayDi
     return albedo;
 }
 
+float dhMaterialRoughness(uint material, float fallbackRoughness) {
+    if (material == DH_MATERIAL_METAL) return 0.28;
+    if (material == DH_MATERIAL_SNOW) return 0.38;
+    if (material == DH_MATERIAL_WOOD) return 0.72;
+    if (material == DH_MATERIAL_STONE) return 0.78;
+    if (material == DH_MATERIAL_DEEPSLATE) return 0.84;
+    if (material == DH_MATERIAL_TERRACOTTA) return 0.76;
+    if (material == DH_MATERIAL_LEAVES) return 0.84;
+    if (material == DH_MATERIAL_GRASS) return 0.92;
+    if (material == DH_MATERIAL_DIRT) return 0.96;
+    if (material == DH_MATERIAL_SAND) return 0.98;
+    if (material == DH_MATERIAL_NETHER_STONE) return 0.88;
+    if (material == DH_MATERIAL_LAVA) return 0.68;
+    if (material == DH_MATERIAL_ILLUMINATED) return clamp(fallbackRoughness, 0.18, 0.90);
+    return clamp(fallbackRoughness, 0.25, 1.0);
+}
+
+float dhMaterialMetalness(uint material, float fallbackMetalness) {
+    if (material == DH_MATERIAL_METAL) return 1.0;
+    if (material == DH_MATERIAL_ILLUMINATED) return clamp(fallbackMetalness, 0.0, 1.0);
+    return 0.0;
+}
+
+float dhMaterialSss(uint material) {
+    if (material == DH_MATERIAL_LEAVES) return 0.18;
+    if (material == DH_MATERIAL_GRASS) return 0.055;
+    if (material == DH_MATERIAL_SNOW) return 0.08;
+    return 0.0;
+}
+
 [shader("closesthit")]
 void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) {
+    // Native DH LOD triangles participate in camera, GI, reflection and shadow rays through the same TLAS.
+    if ((InstanceID() & DH_INSTANCE_KIND) == DH_INSTANCE_KIND) {
+        Section sec = ConstPtr<Section>(pc.dhTableAddr)[InstanceID() & IDX_MASK];
+        uint pid = PrimitiveIndex() + sec.triBase[GeometryIndex()];
+        TerrainPrim pr = ConstPtr<TerrainPrim>(sec.primAddr)[pid];
+        float3 sourceNormal = normalize(pr.normal.xyz);
+        float3 n = sourceNormal;
+        if (dot(n, -WorldRayDirection()) < 0.0) n = -n;
+        uint dhSurface = uint(pr.tint.w + 0.5);
+        uint dhMaterial = pr.flags;
+        bool water = dhSurface == DH_SURFACE_WATER;
+        bool glass = dhSurface == DH_SURFACE_GLASS;
+        bool emissive = dhSurface == DH_SURFACE_EMISSIVE;
+        bool emissiveGlass = dhSurface == DH_SURFACE_EMISSIVE_GLASS;
+        float dhEmission = (emissive || emissiveGlass) ? clamp(asfloat(pr.aux0), 0.0, 4.0) : 0.0;
+        bool entering = dot(WorldRayDirection(), sourceNormal) < 0.0;
+        MaterialHeader dhHeader = ConstPtr<MaterialHeader>(pc.materialTableAddr)[pr.materialId];
+
+        payloadDisableParallax(payload);
+        if (glass || emissiveGlass) {
+            float opticalAlpha = clamp(asfloat(emissiveGlass ? pr.aux1 : pr.aux0), 0.04, 0.80);
+            float3 glassTint = glassTransmissionFilter(pr.tint.rgb, opticalAlpha);
+            float ior = max(dhHeader.params.z, 1.45);
+            float f0Base = (ior - 1.0) / (ior + 1.0);
+            float f0Scalar = f0Base * f0Base;
+            payload.albedo = glassTint;
+            payload.normal = n;
+            payload.hitT = RayTCurrent();
+            payload.motionPrev = float3(0.0, 0.0, 0.0);
+            payload.f0 = float3(f0Scalar, f0Scalar, f0Scalar);
+            payloadSetPacked(payload, MATERIAL_GLASS,
+                    clamp(dhHeader.params.x, 0.025, 0.16), 0.0, dhEmission, 0.0,
+                    -ior, max(dhHeader.params.w, 0.97),
+                    emissiveGlass ? EMISSION_SOURCE_UNIFORM : EMISSION_SOURCE_NONE);
+            return;
+        }
+
+        payload.albedo = pr.tint.rgb;
+        payload.normal = n;
+        payload.hitT = RayTCurrent();
+        payload.motionPrev = float3(0.0, 0.0, 0.0);
+        float roughness = water ? 0.04 : dhMaterialRoughness(dhMaterial, dhHeader.params.x);
+        float metalness = water ? 0.0 : dhMaterialMetalness(dhMaterial, dhHeader.params.y);
+        float sss = water ? 0.0 : dhMaterialSss(dhMaterial);
+        payload.f0 = water ? float3(0.02, 0.02, 0.02)
+                : lerp(float3(0.04, 0.04, 0.04), payload.albedo, metalness);
+        payloadSetPacked(payload, water ? MATERIAL_WATER : MATERIAL_OPAQUE,
+                roughness, metalness, dhEmission, sss,
+                water ? 1.333 : max(dhHeader.params.z, 1.0), water ? 1.0 : 0.0,
+                emissive ? EMISSION_SOURCE_UNIFORM : EMISSION_SOURCE_NONE);
+        if (water && entering) payload.flags |= PAYLOAD_WATER_ENTERING;
+        return;
+    }
     float2 attribs = attr.barycentrics;
     uint rayCone = payload.rayCone;
 

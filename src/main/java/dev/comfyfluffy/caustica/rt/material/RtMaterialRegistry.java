@@ -580,8 +580,26 @@ public final class RtMaterialRegistry {
             return waterId;
         }
 
+        /**
+         * Generic untextured thin dielectric used by coarse geometry sources such as Distant Horizons,
+         * which retain vertex colour and alpha but do not expose the original block sprite.
+         */
+        public int glassId() {
+            return fallbackVariants[index(RtMaterials.Profile.DEFAULT, true, false)];
+        }
+
         public int lavaId() {
             return lavaId;
+        }
+
+        /** Generic untextured opaque emitter for coarse geometry without a source sprite. */
+        public int emissiveId() {
+            return fallbackVariants[index(RtMaterials.Profile.DEFAULT, false, true)];
+        }
+
+        /** Generic untextured emitting dielectric for illuminated transparent coarse geometry. */
+        public int emissiveGlassId() {
+            return fallbackVariants[index(RtMaterials.Profile.DEFAULT, true, true)];
         }
 
         public int materialCount() {

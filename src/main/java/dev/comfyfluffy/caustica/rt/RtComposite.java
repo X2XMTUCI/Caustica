@@ -18,6 +18,7 @@ import dev.comfyfluffy.caustica.rt.gen.WorldPushData.Float2;
 import dev.comfyfluffy.caustica.rt.gen.WorldPushData.Float3;
 import dev.comfyfluffy.caustica.rt.gen.WorldPushData.Float4;
 import dev.comfyfluffy.caustica.rt.gen.WorldPushData.Int4;
+import dev.comfyfluffy.caustica.rt.terrain.RtDistantHorizonsTerrain;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.BiomeColors;
 import net.minecraft.client.renderer.texture.TextureAtlas;
@@ -780,6 +781,7 @@ public final class RtComposite {
 
             boolean rrDone = false;
             RtTerrain terrain = RtTerrain.currentOrNull();
+            RtDistantHorizonsTerrain.INSTANCE.frame(ctx, terrain.blockX, terrain.blockY, terrain.blockZ);
             // Select the next BDA ring slot; the generated WorldPushData serializer fills it once all
             // frame-derived values (including entity addresses and block-breaking entries) are known.
             pushSlot = (pushSlot + 1) % PUSH_RING;
@@ -826,7 +828,8 @@ public final class RtComposite {
             // float precision). hitPos.xz (rebased) + anchor reconstructs a world-pinned coordinate, so the
             // ripple pattern stays fixed in the world as the player moves and the rebase origin shifts.
             Float4 waterAnchor = new Float4(terrain.blockX & WATER_ANCHOR_MASK,
-                    terrain.blockZ & WATER_ANCHOR_MASK, 0f, 0f);
+                    terrain.blockZ & WATER_ANCHOR_MASK,
+                    Minecraft.getInstance().options.renderDistance().get() * 16f, 0f);
 
             // Rebuild the TLAS this frame from static section instances merged with dynamic entity
             // instances, bind it into the pipeline's descriptor ring, record the build, then barrier so
@@ -835,7 +838,9 @@ public final class RtComposite {
             // generations are reclaimed by graphics-timeline completion.
             // Entity BLASes are built inline below and merged into the per-frame TLAS. geomTableAddr
             // feeds the hit shader entity path (per-prim normal/tint) and motion vectors.
-            RtEntities.FrameEntities fe = RtEntities.INSTANCE.beginFrame(ctx, terrain.staticInstances(),
+            var staticInstances = RtDistantHorizonsTerrain.INSTANCE.appendInstances(
+                    terrain.staticInstances(), terrain.blockX, terrain.blockY, terrain.blockZ);
+            RtEntities.FrameEntities fe = RtEntities.INSTANCE.beginFrame(ctx, staticInstances,
                     terrain.blockX, terrain.blockY, terrain.blockZ, camX, camY, camZ, frameProjection, frameViewRotation);
             // Block-breaking overlay: resolves each destroy-stage RenderType's texture into the
             // SAME bindless entity-texture array (destroy_stage_N.png is a standalone Sampler0 texture,
@@ -862,6 +867,7 @@ public final class RtComposite {
                             (float) (camZ - terrain.blockZ)),
                     terrain.tableAddress(),
                     (int) frameCounter,
+                    0,
                     mvPushMatrix,
                     new Float3(mvCamDeltaX, mvCamDeltaY, mvCamDeltaZ),
                     spp(),
@@ -869,6 +875,8 @@ public final class RtComposite {
                     fe.geomTableAddr(),
                     flags,
                     maxBounces(),
+                    0,
+                    0,
                     sky.sunDir(),
                     sky.lightDir(),
                     sky.lightRadiance(),
@@ -880,6 +888,9 @@ public final class RtComposite {
                     waterAnchor,
                     mvCurProjView,
                     breaking.length,
+                    0,
+                    0,
+                    0,
                     breaking,
                     parallaxParams,
                     fogParams,
@@ -911,6 +922,7 @@ public final class RtComposite {
             // Push the BDA ring slot's address plus the small hot subset used directly by the shaders.
             ByteBuffer pushConstants = stack.malloc(WorldPushConstantsData.BYTE_SIZE);
             new WorldPushConstantsData(pushBuf.deviceAddress, terrain.tableAddress(), fe.geomTableAddr(),
+                    RtDistantHorizonsTerrain.INSTANCE.tableAddress(),
                     RtMaterialRegistry.INSTANCE.tableAddress(),
                     (int) frameCounter, debugView).write(pushConstants);
             try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "world trace");

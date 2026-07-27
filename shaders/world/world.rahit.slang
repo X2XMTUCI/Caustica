@@ -57,6 +57,36 @@ void main(inout float4 shadowVis, in BuiltInTriangleIntersectionAttributes attr)
     float3 bary = float3(1.0 - attribs.x - attribs.y, attribs.x, attribs.y);
 
     uint instanceKind = InstanceID() & (ENTITY_BIT | PARTICLE_BIT);
+    if (instanceKind == DH_INSTANCE_KIND) {
+        WorldPush worldPush = ConstPtr<WorldPush>(pc.worldPushAddr)[0];
+        float3 hitPos = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
+        float2 fromCamera = abs(hitPos.xz - worldPush.camOffset.xz);
+        if (max(fromCamera.x, fromCamera.y) <= worldPush.waterAnchor.z) {
+            // Vanilla terrain is authoritative inside its live render-distance boundary.
+            IgnoreHit();
+            return;
+        }
+
+        Section sec = ConstPtr<Section>(pc.dhTableAddr)[InstanceID() & IDX_MASK];
+        uint tri = pid + sec.triBase[GeometryIndex()];
+        TerrainPrim pr = ConstPtr<TerrainPrim>(sec.primAddr)[tri];
+        bool shadowRay = (RayFlags() & RAY_FLAG_SKIP_CLOSEST_HIT_SHADER) != 0u;
+        uint dhSurface = uint(pr.tint.w + 0.5);
+        if (dhSurface == DH_SURFACE_WATER && shadowRay) {
+            shadowVis.rgb *= lerp(float3(1.0, 1.0, 1.0), pr.tint.rgb, WATER_SHADOW_TINT);
+            shadowVis.a = shadowVis.a < 0.0 ? RayTCurrent() : min(shadowVis.a, RayTCurrent());
+            IgnoreHit();
+            return;
+        }
+        if ((dhSurface == DH_SURFACE_GLASS || dhSurface == DH_SURFACE_EMISSIVE_GLASS) && shadowRay) {
+            float opticalAlpha = clamp(asfloat(dhSurface == DH_SURFACE_EMISSIVE_GLASS
+                    ? pr.aux1 : pr.aux0), 0.04, 0.80);
+            shadowVis.rgb *= glassTransmissionFilter(pr.tint.rgb, opticalAlpha) * 0.94;
+            IgnoreHit();
+            return;
+        }
+        return;
+    }
     if (instanceKind != 0u) {
         EntityGeom g = ConstPtr<EntityGeom>(pc.entityTableAddr)[InstanceID() & IDX_MASK];
         pid += g.triBase[GeometryIndex()];

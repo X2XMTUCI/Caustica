@@ -87,5 +87,8 @@
 	"caustica.options.rt.debugView.6": "Specular",
 	"caustica.options.rt.debugView.7": "Specular Motion",
 	"caustica.options.rt.debugView.8": "Emission Mask",
-	"caustica.options.rt.debugView.9": "Emission Source"
+	"caustica.options.rt.debugView.9": "Emission Source",
+	"caustica.options.rt.dhRefresh": "Reload Distant Horizons Chunks",
+	"caustica.options.rt.dhRefresh.queued": "Distant Horizons Reload Queued",
+	"caustica.options.rt.dhRefresh.rtOnly": "Caustica RT Proxy Reload Queued"
 }
