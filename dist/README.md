@@ -5,16 +5,16 @@
 Install both files:
 
 - `caustica-0.1.0-voxy-compat.jar`
-  - Size: 40,080,699 bytes
-  - SHA-256: `B8296989DEC331A942D8C97E3A88B8FA8710F1A183FD6E00A9E07BBFD192FED2`
-- `voxy-0.2.18-beta-caustica.9-mc26.2.jar`
-  - Size: 38,809,841 bytes
-  - SHA-256: `5F5F5C3BC83CC186CE2A1DD71142C4A964FABE8E82D01BCDC2D2450757166CBE`
+  - Size: 40,081,886 bytes
+  - SHA-256: `381308561CF44465A82D59EE8E048C7AD473AE22B65526A821EEB011B6ED0F59`
+- `voxy-0.2.18-beta-caustica.10-mc26.2.jar`
+  - Size: 38,810,012 bytes
+  - SHA-256: `3B333CB0A6BDCF2EBA9A6E16AEF89701C6ED00B4655FCF3A8D6126938EB9A520`
 
 This Voxy edition is a CPU-side world/LOD provider for Caustica. It does not require Sodium and
 does not start Voxy's standalone raster renderer. Caustica progressively converts Voxy LOD meshes
 to BLAS/TLAS geometry so distant terrain participates in path-traced visibility, lighting and shadows.
-The `.9` build ingests ordinary Fabric client chunks directly, safely hooks optional Chunky
+The `.10` build ingests ordinary Fabric client chunks directly, safely hooks optional Chunky
 pre-generation, and provides `/voxy import current` for existing singleplayer region files;
 none of these paths depends on Sodium. It also fixes the exact Chunky receiver signature used
 by the optional Mixin, preventing a crash while entering a world with Chunky installed. Fine
@@ -34,7 +34,11 @@ body, and hidden fluid faces against opaque lake beds and banks are omitted. Eve
 uses a ray-traced thin dielectric boundary rather than pretending sparse proxy voxels form a closed
 volume, preventing repeated medium transitions, black intersecting sheets and grey distant lakes.
 Real loaded-chunk water remains volumetric. States without a Minecraft MapColor use a stable
-per-state fallback instead of literal mid-grey.
+per-state fallback instead of literal mid-grey. Water radiance rays now apply the same exact
+per-section hand-off mask as solid terrain, so a Voxy water proxy cannot remain over a published
+real chunk. Proxy water uses the normal water shader without claiming a closed absorption medium.
+Non-voxel cross/partial models such as tall grass, torches and panes are no longer converted into
+full transparent cubes; nearby real chunks still render their actual models.
 
 Remove any other Voxy JAR from the `mods` folder. Sodium is not required by this build.
 
