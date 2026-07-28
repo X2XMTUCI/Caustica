@@ -90,7 +90,9 @@ final class RtReliefPathTracingShaderTest {
         assertTrue(closestHit.contains(
                 "material == MATERIAL_OPAQUE && terrainAllowsParallax"));
         assertTrue(pipeline.contains(
-                "|| bucket == RtAccel.BUCKET_TRANSLUCENT;"));
+                "|| bucket == RtAccel.BUCKET_TRANSLUCENT"));
+        assertTrue(pipeline.contains(
+                "|| bucket == RtAccel.BUCKET_WATER;"));
         assertTrue(anyHit.contains(
                 "if (!shadowRay)"));
         assertTrue(anyHit.contains(

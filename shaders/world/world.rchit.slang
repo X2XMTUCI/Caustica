@@ -463,12 +463,10 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         MaterialHeader dhHeader = ConstPtr<MaterialHeader>(pc.materialTableAddr)[pr.materialId];
 
         payloadDisableParallax(payload);
-        if (glass || emissiveGlass || thinLodWater) {
-            float opticalAlpha = thinLodWater
-                    ? 0.32
-                    : clamp(asfloat(emissiveGlass ? pr.aux1 : pr.aux0), 0.04, 0.80);
+        if (glass || emissiveGlass) {
+            float opticalAlpha = clamp(asfloat(emissiveGlass ? pr.aux1 : pr.aux0), 0.04, 0.80);
             float3 glassTint = glassTransmissionFilter(pr.tint.rgb, opticalAlpha);
-            float ior = thinLodWater ? 1.333 : max(dhHeader.params.z, 1.45);
+            float ior = max(dhHeader.params.z, 1.45);
             float f0Base = (ior - 1.0) / (ior + 1.0);
             float f0Scalar = f0Base * f0Base;
             payload.albedo = glassTint;
@@ -477,10 +475,25 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
             payload.motionPrev = float3(0.0, 0.0, 0.0);
             payload.f0 = float3(f0Scalar, f0Scalar, f0Scalar);
             payloadSetPacked(payload, MATERIAL_GLASS,
-                    thinLodWater ? 0.055 : clamp(dhHeader.params.x, 0.025, 0.16),
+                    clamp(dhHeader.params.x, 0.025, 0.16),
                     0.0, dhEmission, 0.0,
-                    -ior, thinLodWater ? 0.985 : max(dhHeader.params.w, 0.97),
+                    -ior, max(dhHeader.params.w, 0.97),
                     emissiveGlass ? EMISSION_SOURCE_UNIFORM : EMISSION_SOURCE_NONE);
+            return;
+        }
+
+        if (thinLodWater) {
+            // Shade proxy water with the normal water interface (waves, refraction and water guides),
+            // but deliberately do not set PAYLOAD_WATER_ENTERING: this sparse top/shore boundary does
+            // not own a closed medium. A transmitted ray therefore sees the Voxy lake bed instead of
+            // turning the whole LOD cell into a blue mirror/absorbing volume.
+            payload.albedo = pr.tint.rgb;
+            payload.normal = n;
+            payload.hitT = RayTCurrent();
+            payload.motionPrev = float3(0.0, 0.0, 0.0);
+            payload.f0 = float3(0.02, 0.02, 0.02);
+            payloadSetPacked(payload, MATERIAL_WATER, 0.075, 0.0, 0.0, 0.0,
+                    1.333, 0.985, EMISSION_SOURCE_NONE);
             return;
         }
 

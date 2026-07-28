@@ -352,7 +352,7 @@ public final class RtPipeline {
         }
     }
 
-    private static boolean hitGroupUsesAnyHit(int relativeHitGroup) {
+    static boolean hitGroupUsesAnyHit(int relativeHitGroup) {
         if (relativeHitGroup < RtAccel.SBT_ENTITY_OFFSET) {
             int rayType = relativeHitGroup / RtAccel.TERRAIN_BUCKETS;
             int bucket = relativeHitGroup % RtAccel.TERRAIN_BUCKETS;
@@ -361,7 +361,11 @@ public final class RtPipeline {
                 // holes, not dielectric interfaces: running any-hit lets world.rahit discard them
                 // before closest-hit writes glass depth/normals or launches a Fresnel reflection.
                 return bucket == RtAccel.BUCKET_CUTOUT
-                        || bucket == RtAccel.BUCKET_TRANSLUCENT;
+                        || bucket == RtAccel.BUCKET_TRANSLUCENT
+                        // Voxy/DH water must run any-hit on radiance rays as well: that shader owns the
+                        // exact per-section hand-off mask which removes the proxy once real RT terrain
+                        // is published. Loaded-chunk water simply falls through unchanged.
+                        || bucket == RtAccel.BUCKET_WATER;
             }
             return bucket != RtAccel.BUCKET_SOLID;
         }

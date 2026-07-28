@@ -161,9 +161,14 @@ void main(inout float4 shadowVis, in BuiltInTriangleIntersectionAttributes attr)
     uint bucket = GeometryIndex();
     uint tri = pid + sec.triBase[bucket];
 
-    // Water radiance rays use a closest-hit-only SBT record. Shadow rays run this record: tint sunlight by
-    // the biome water color, then keep walking so submerged terrain is lit by colored transmission.
+    // Water radiance rays also run any-hit so the DH/Voxy branch above can apply its per-section hand-off
+    // mask. Ordinary loaded-chunk water must fall through untouched; shadow rays tint sunlight by the
+    // biome water color, then keep walking so submerged terrain is lit by colored transmission.
     if (bucket == BUCKET_WATER) {
+        bool shadowRay = (RayFlags() & RAY_FLAG_SKIP_CLOSEST_HIT_SHADER) != 0u;
+        if (!shadowRay) {
+            return;
+        }
         TerrainPrim pr = ConstPtr<TerrainPrim>(sec.primAddr)[tri];
         shadowVis.rgb *= lerp(float3(1.0, 1.0, 1.0), pr.tint.rgb, WATER_SHADOW_TINT);
         // Record the NEAREST water crossing (any-hit order is arbitrary) in the otherwise-unused alpha
