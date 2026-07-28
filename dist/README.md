@@ -5,16 +5,16 @@
 Install both files:
 
 - `caustica-0.1.0-voxy-compat.jar`
-  - Size: 40,075,690 bytes
-  - SHA-256: `1301D1311308DBEFAE59EADFA7614AECB56EFA72DA11F61A0D9DBF23AC51349A`
-- `voxy-0.2.18-beta-caustica.6-mc26.2.jar`
-  - Size: 38,808,922 bytes
-  - SHA-256: `6CFD54E611D89C447570E8BDF69A1BCDB01E03F90B7C24B7026F73EDA5B75B88`
+  - Size: 40,075,776 bytes
+  - SHA-256: `FFF4B36C68F208106107B306ECFC89D47921229D2DE7555571084E72CF831A81`
+- `voxy-0.2.18-beta-caustica.7-mc26.2.jar`
+  - Size: 38,809,702 bytes
+  - SHA-256: `6053711B85597CD841C08961481DDE4B2830C7512C351DA2AD266D374B7FFC4F`
 
 This Voxy edition is a CPU-side world/LOD provider for Caustica. It does not require Sodium and
 does not start Voxy's standalone raster renderer. Caustica progressively converts Voxy LOD meshes
 to BLAS/TLAS geometry so distant terrain participates in path-traced visibility, lighting and shadows.
-The `.6` build ingests ordinary Fabric client chunks directly, safely hooks optional Chunky
+The `.7` build ingests ordinary Fabric client chunks directly, safely hooks optional Chunky
 pre-generation, and provides `/voxy import current` for existing singleplayer region files;
 none of these paths depends on Sodium. It also fixes the exact Chunky receiver signature used
 by the optional Mixin, preventing a crash while entering a world with Chunky installed. Fine
@@ -24,7 +24,11 @@ gaps and overlapping Voxy/vanilla triangles while either side is still streaming
 comes from the active resource-pack sprites instead of Minecraft's coarse map colour, preserves
 different colours for each block face, and applies the persisted Voxy biome to grass, foliage and
 water. High-resolution packs use a bounded 64x64 average so first-time colour resolution remains
-background work rather than a mesh-streaming spike.
+background work rather than a mesh-streaming spike. Streaming no longer restarts Caustica's whole
+BLAS queue as progressively coarser Voxy rings appear. The expensive one-block ring follows the
+actual vanilla render distance with a four-chunk hand-off margin, distant coarse rings are
+prioritized for fast horizon coverage, material classification is cached once per voxel, and
+opaque/transparent slices from one section share a bounded BLAS whenever possible.
 
 Remove any other Voxy JAR from the `mods` folder. Sodium is not required by this build.
 
