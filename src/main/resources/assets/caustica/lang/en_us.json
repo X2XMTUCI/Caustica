@@ -1,4 +1,16 @@
 {
+	"caustica.options.voxy.header": "Voxy LODs",
+	"caustica.options.voxy.enabled": "Voxy LODs",
+	"caustica.options.voxy.enabled.tooltip": "Enable Voxy distant terrain in the Caustica path tracer. This takes effect immediately.",
+	"caustica.options.voxy.ingest": "Load New Chunks",
+	"caustica.options.voxy.ingest.tooltip": "Allow Voxy to ingest and save newly loaded Minecraft chunks. Existing cached LODs remain available when disabled.",
+	"caustica.options.voxy.distance": "LOD Distance",
+	"caustica.options.voxy.distance.tooltip": "Maximum horizontal distance of Voxy terrain. Increasing it uses more memory and takes longer to populate.",
+	"caustica.options.voxy.chunks": "%s chunks",
+	"caustica.options.voxy.refresh": "Rebuild Voxy LODs",
+	"caustica.options.voxy.refresh.queued": "Voxy rebuild queued",
+	"caustica.options.voxy.refresh.unavailable": "Voxy is unavailable",
+
 	"caustica.options.rt.header": "Ray Tracing",
 
 	"caustica.options.rt.exposureMode": "Exposure",

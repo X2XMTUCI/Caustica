@@ -31,6 +31,71 @@ public final class VoxyCompat {
         return API != null;
     }
 
+    /** Whether the installed provider is currently enabled in Voxy's persistent config. */
+    public static boolean active() {
+        Api api = API;
+        if (api == null) return false;
+        try {
+            return Boolean.TRUE.equals(api.configuredEnabled.invoke(null));
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    public static boolean setActive(boolean enabled) {
+        Api api = API;
+        if (api == null) return false;
+        try {
+            api.setConfiguredEnabled.invoke(null, enabled);
+            if (!enabled) clearLocalSnapshot();
+            return true;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    public static boolean ingestEnabled() {
+        Api api = API;
+        if (api == null) return false;
+        try {
+            return Boolean.TRUE.equals(api.configuredIngestEnabled.invoke(null));
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    public static boolean setIngestEnabled(boolean enabled) {
+        Api api = API;
+        if (api == null) return false;
+        try {
+            api.setConfiguredIngestEnabled.invoke(null, enabled);
+            return true;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    public static int configuredRenderDistanceChunks() {
+        Api api = API;
+        if (api == null) return 32;
+        try {
+            return Math.clamp(((Number) api.configuredRenderDistanceChunks.invoke(null)).intValue(), 32, 512);
+        } catch (Throwable ignored) {
+            return 32;
+        }
+    }
+
+    public static boolean setConfiguredRenderDistanceChunks(int chunks) {
+        Api api = API;
+        if (api == null) return false;
+        try {
+            api.setConfiguredRenderDistanceChunks.invoke(null, Math.clamp(chunks, 32, 512));
+            return true;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
     /** Poll the provider on the render thread; the RT planning worker only reads the immutable result. */
     public static void tick() {
         Api api = API;
@@ -100,10 +165,7 @@ public final class VoxyCompat {
 
     public static boolean reset() {
         Api api = API;
-        snapshot = List.of();
-        revision++;
-        observedSourceRevision = Long.MIN_VALUE;
-        renderDistanceChunks = 0;
+        clearLocalSnapshot();
         if (api == null) return false;
         try {
             api.reset.invoke(null);
@@ -111,6 +173,13 @@ public final class VoxyCompat {
         } catch (Throwable ignored) {
             return false;
         }
+    }
+
+    private static void clearLocalSnapshot() {
+        snapshot = List.of();
+        revision++;
+        observedSourceRevision = Long.MIN_VALUE;
+        renderDistanceChunks = 0;
     }
 
     private record Access(Method key, Method version, Method originX, Method originY, Method originZ,
@@ -128,6 +197,12 @@ public final class VoxyCompat {
         final Method revision;
         final Method renderDistanceChunks;
         final Method reset;
+        final Method configuredEnabled;
+        final Method setConfiguredEnabled;
+        final Method configuredIngestEnabled;
+        final Method setConfiguredIngestEnabled;
+        final Method configuredRenderDistanceChunks;
+        final Method setConfiguredRenderDistanceChunks;
         private volatile Class<?> meshType;
         private volatile Access meshAccess;
 
@@ -137,6 +212,13 @@ public final class VoxyCompat {
             revision = bridge.getMethod("revision");
             renderDistanceChunks = bridge.getMethod("renderDistanceChunks");
             reset = bridge.getMethod("reset");
+            configuredEnabled = bridge.getMethod("configuredEnabled");
+            setConfiguredEnabled = bridge.getMethod("setConfiguredEnabled", boolean.class);
+            configuredIngestEnabled = bridge.getMethod("configuredIngestEnabled");
+            setConfiguredIngestEnabled = bridge.getMethod("setConfiguredIngestEnabled", boolean.class);
+            configuredRenderDistanceChunks = bridge.getMethod("configuredRenderDistanceChunks");
+            setConfiguredRenderDistanceChunks =
+                    bridge.getMethod("setConfiguredRenderDistanceChunks", int.class);
         }
 
         static Api create() {

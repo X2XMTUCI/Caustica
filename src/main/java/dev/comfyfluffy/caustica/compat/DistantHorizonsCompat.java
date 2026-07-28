@@ -105,7 +105,7 @@ public final class DistantHorizonsCompat {
 
     public static List<LodMesh> lodMeshesSnapshot() {
         if (!enabled()) return List.of();
-        List<LodMesh> voxy = VoxyCompat.meshes();
+        List<LodMesh> voxy = VoxyCompat.active() ? VoxyCompat.meshes() : List.of();
         // Never render two independently simplified copies of the same horizon. Prefer Voxy while it has
         // an active snapshot, then fall back to DH during Voxy bootstrap or when only DH is installed.
         if (!voxy.isEmpty()) return voxy;
@@ -235,7 +235,7 @@ public final class DistantHorizonsCompat {
     }
 
     public static boolean enabled() {
-        return LOADED || VoxyCompat.enabled();
+        return LOADED || VoxyCompat.active();
     }
 
     /** Update optional providers on the render thread before the RT proxy observes their revision. */
@@ -265,7 +265,7 @@ public final class DistantHorizonsCompat {
     /** Current DH horizontal quality. Changes are polled by the RT proxy to trigger immediate refinement. */
     public static LodQuality lodQuality() {
         if (!enabled()) return new LodQuality(0L, 16, 2, "UNKNOWN", "UNKNOWN");
-        if (VoxyCompat.enabled()) {
+        if (VoxyCompat.active()) {
             // The set of widths in a Voxy snapshot is streaming availability, not a user quality setting.
             // Treating its transient maximum as configuration made every newly-arrived 2/4/8-block ring
             // cancel thousands of in-flight BLAS builds and restart the complete proxy. Voxy's finest

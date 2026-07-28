@@ -7,6 +7,7 @@ import dev.comfyfluffy.caustica.CausticaConfig.FloatSetting;
 import dev.comfyfluffy.caustica.CausticaConfig.IntSetting;
 import dev.comfyfluffy.caustica.CausticaConfig.StringSetting;
 import dev.comfyfluffy.caustica.compat.DistantHorizonsCompat;
+import dev.comfyfluffy.caustica.compat.VoxyCompat;
 import dev.comfyfluffy.caustica.rt.terrain.RtDistantHorizonsTerrain;
 import java.util.List;
 import java.util.Locale;
@@ -63,6 +64,39 @@ public final class RtVideoOptions {
             hdrPaperWhite(),
             hdrPeak(),
             debugView(),
+        };
+    }
+
+    /** Live settings supplied by the bundled no-Sodium Voxy bridge. */
+    public static OptionInstance<?>[] voxyOptions() {
+        return new OptionInstance<?>[] {
+            OptionInstance.createBoolean(
+                    "caustica.options.voxy.enabled",
+                    OptionInstance.cachedConstantTooltip(
+                            Component.translatable("caustica.options.voxy.enabled.tooltip")),
+                    VoxyCompat.active(),
+                    enabled -> {
+                        if (VoxyCompat.setActive(enabled)) {
+                            RtDistantHorizonsTerrain.INSTANCE.requestFullRefresh();
+                        }
+                    }),
+            OptionInstance.createBoolean(
+                    "caustica.options.voxy.ingest",
+                    OptionInstance.cachedConstantTooltip(
+                            Component.translatable("caustica.options.voxy.ingest.tooltip")),
+                    VoxyCompat.ingestEnabled(),
+                    VoxyCompat::setIngestEnabled),
+            new OptionInstance<>(
+                    "caustica.options.voxy.distance",
+                    OptionInstance.cachedConstantTooltip(
+                            Component.translatable("caustica.options.voxy.distance.tooltip")),
+                    (caption, sections) -> Options.genericValueLabel(caption,
+                            Component.translatable("caustica.options.voxy.chunks", sections * 32)),
+                    // Voxy stores this value in 32-block sections. Exposing the native steps avoids
+                    // hundreds of config writes and full desired-set recalculations during one drag.
+                    new OptionInstance.IntRange(1, 16),
+                    Math.clamp(VoxyCompat.configuredRenderDistanceChunks() / 32, 1, 16),
+                    sections -> VoxyCompat.setConfiguredRenderDistanceChunks(sections * 32))
         };
     }
 
@@ -328,6 +362,19 @@ public final class RtVideoOptions {
                     : "caustica.options.rt.dhRefresh.rtOnly"));
         }).width(310).build();
         button.active = DistantHorizonsCompat.enabled() && Minecraft.getInstance().level != null;
+        return button;
+    }
+
+    /** Drop Voxy's generated proxy cache and start a bounded rebuild around the current camera. */
+    public static Button voxyRefreshButton() {
+        Button button = Button.builder(Component.translatable("caustica.options.voxy.refresh"), clicked -> {
+            boolean reset = VoxyCompat.reset();
+            RtDistantHorizonsTerrain.INSTANCE.requestFullRefresh();
+            clicked.setMessage(Component.translatable(reset
+                    ? "caustica.options.voxy.refresh.queued"
+                    : "caustica.options.voxy.refresh.unavailable"));
+        }).width(310).build();
+        button.active = VoxyCompat.enabled() && Minecraft.getInstance().level != null;
         return button;
     }
 

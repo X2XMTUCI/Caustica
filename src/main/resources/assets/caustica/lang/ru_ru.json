@@ -1,4 +1,16 @@
 {
+	"caustica.options.voxy.header": "Лоды Voxy",
+	"caustica.options.voxy.enabled": "Лоды Voxy",
+	"caustica.options.voxy.enabled.tooltip": "Включает дальний ландшафт Voxy в трассировщике Caustica. Применяется сразу.",
+	"caustica.options.voxy.ingest": "Загрузка новых чанков",
+	"caustica.options.voxy.ingest.tooltip": "Разрешает Voxy обрабатывать и сохранять новые чанки Minecraft. Уже сохранённые лоды останутся доступны после отключения.",
+	"caustica.options.voxy.distance": "Дальность лодов",
+	"caustica.options.voxy.distance.tooltip": "Максимальная горизонтальная дальность ландшафта Voxy. Большая дальность требует больше памяти и дольше загружается.",
+	"caustica.options.voxy.chunks": "%s чанков",
+	"caustica.options.voxy.refresh": "Перестроить лоды Voxy",
+	"caustica.options.voxy.refresh.queued": "Перестроение Voxy запущено",
+	"caustica.options.voxy.refresh.unavailable": "Voxy недоступен",
+
 	"caustica.options.rt.header": "Трассировка лучей",
 
 	"caustica.options.rt.exposureMode": "Экспозиция",
