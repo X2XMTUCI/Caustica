@@ -45,8 +45,8 @@ public struct WorldPush {
     public uint64_t entityTableAddr;  // entity geometry table
     public uint     flags;            // bit0 camera submerged, bit1 PBR, bit4 water waves, bit5 POM smoothing
     public uint     maxBounces;
-    public uint     sunVectorPad0;
-    public uint     sunVectorPad1;
+    public uint     sunVectorPad0;    // low 32 bits of per-frame vanilla-ready section mask BDA
+    public uint     sunVectorPad1;    // high 32 bits of per-frame vanilla-ready section mask BDA
     public float4   sunDir;           // xyz true sun direction, w dayFactor 0..1
     public float4   lightDir;         // xyz active NEE light dir, w square half-angle (rad)
     public float4   lightRadiance;    // xyz HDR light radiance, w star brightness

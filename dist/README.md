@@ -5,8 +5,8 @@
 Install both files:
 
 - `caustica-0.1.0-voxy-compat.jar`
-  - Size: 40,073,090 bytes
-  - SHA-256: `825A004F5082E0589C2FE360FA7548506E76940DC7E5003E91A32BEB92E38387`
+  - Size: 40,075,690 bytes
+  - SHA-256: `1301D1311308DBEFAE59EADFA7614AECB56EFA72DA11F61A0D9DBF23AC51349A`
 - `voxy-0.2.18-beta-caustica.5-mc26.2.jar`
   - Size: 38,798,017 bytes
   - SHA-256: `794A74925F069C900A2594028F8325D5984E1CFFB7B8EE9A7D9DDE71866C22F2`
@@ -19,7 +19,8 @@ pre-generation, and provides `/voxy import current` for existing singleplayer re
 none of these paths depends on Sodium. It also fixes the exact Chunky receiver signature used
 by the optional Mixin, preventing a crash while entering a world with Chunky installed. Fine
 Voxy coverage now remains available beneath the vanilla RT window, while Caustica switches to
-real chunks only across a contiguous boundary of actually published RT sections.
+real chunks through an exact per-16x16x16-section readiness mask. This avoids both empty handoff
+gaps and overlapping Voxy/vanilla triangles while either side is still streaming.
 
 Remove any other Voxy JAR from the `mods` folder. Sodium is not required by this build.
 

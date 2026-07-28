@@ -136,6 +136,21 @@ final class RtReliefPathTracingShaderTest {
     }
 
     @Test
+    void distantTerrainHandoffUsesExactPublishedSectionMask() throws IOException {
+        String anyHit = shader("world.rahit.slang");
+        String composite = Files.readString(Path.of("src", "main", "java", "dev", "comfyfluffy",
+                "caustica", "rt", "RtComposite.java"));
+
+        assertTrue(anyHit.contains("bool vanillaRtSectionReady(float3 hitPos, WorldPush worldPush)"));
+        assertTrue(anyHit.contains("mask[7] != 0x43535452u"));
+        assertTrue(anyHit.contains("mask[8 + word]"));
+        assertTrue(anyHit.contains("if (vanillaRtSectionReady(hitPos, worldPush))"));
+        assertFalse(anyHit.contains("max(fromCamera.x, fromCamera.y) <= worldPush.waterAnchor.z"));
+        assertTrue(composite.contains("RtTerrain.writeDistantReadyMask(readyMask)"));
+        assertTrue(composite.contains("(int) (readyMaskAddress >>> 32)"));
+    }
+
+    @Test
     void baselineBytecodeOverlayAddsPersistentDistanceSliderAndPushValue() throws IOException {
         String patcher = Files.readString(Path.of("tools", "RemoveParallaxShadowOption.java"));
 

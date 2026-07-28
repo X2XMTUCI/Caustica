@@ -50,7 +50,9 @@ import net.minecraft.world.level.material.FluidState;
 import org.joml.Vector3fc;
 import org.lwjgl.system.MemoryUtil;
 
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
@@ -185,14 +187,10 @@ public final class RtTerrain {
     private int windowRadius;
     private int windowLoY;
     private int windowHiY;
-    // Largest camera-centred square that is wholly backed by published vanilla RT sections. Distant
-    // geometry is suppressed only inside this proven-ready area, never merely because the configured
-    // render distance says that vanilla chunks should eventually exist there.
-    private float distantHandoffRadiusBlocks;
-    private boolean distantHandoffDirty = true;
-    private int distantHandoffPcx;
-    private int distantHandoffPcz;
-    private int distantReadyChunkRadius = -1;
+    // CPU cache copied into the current WorldPush ring slot. One bit per 16^3 section tells the DH/Voxy
+    // any-hit path whether that exact vanilla section is already represented by the live RT table.
+    private int[] distantReadyMaskWords = new int[0];
+    private boolean distantReadyMaskDirty = true;
     // When the last streaming pass ran on a render frame — the tick fallback watches this (see
     // STREAM_FALLBACK_AFTER_NANOS).
     private long lastFrameStreamNanos;
@@ -222,9 +220,13 @@ public final class RtTerrain {
         return INSTANCE.ready && ((INSTANCE.resident.containsKey(key) && INSTANCE.published.contains(key)) || INSTANCE.empty.contains(key));
     }
 
-    /** Safe near-field radius in which Voxy/DH hits may be replaced by real vanilla RT geometry. */
-    public static float distantHandoffRadiusBlocks() {
-        return INSTANCE.distantHandoffRadiusBlocks;
+    /**
+     * Serialize the exact per-section vanilla readiness mask into a per-frame BDA ring slice.
+     *
+     * @return written byte count, or zero when no valid terrain window exists
+     */
+    public static int writeDistantReadyMask(ByteBuffer dst) {
+        return INSTANCE.writeReadyMask(dst);
     }
 
     /**
@@ -366,8 +368,7 @@ public final class RtTerrain {
         if (System.nanoTime() - lastFrameStreamNanos > STREAM_FALLBACK_AFTER_NANOS) {
             stream(ctx);
         }
-        updateDistantHandoffRadius(mc.player.getX(), mc.player.getZ(), pcx, pcz, r, loY, hiY);
-        distantHandoffDirty = false;
+        distantReadyMaskDirty = true;
     }
 
     /** The per-render-frame entry point: run one count-bounded streaming pass. */
@@ -378,16 +379,6 @@ public final class RtTerrain {
         }
         lastFrameStreamNanos = System.nanoTime();
         stream(ctx);
-        if (distantHandoffDirty && windowValid) {
-            updateDistantHandoffRadius(mc.player.getX(), mc.player.getZ(),
-                    mc.player.getBlockX() >> 4, mc.player.getBlockZ() >> 4,
-                    windowRadius, windowLoY, windowHiY);
-            distantHandoffDirty = false;
-        } else {
-            // Camera movement within a chunk changes the largest camera-centred square even though the
-            // expensive published-column readiness result itself is unchanged.
-            refreshDistantHandoffRadius(mc.player.getX(), mc.player.getZ());
-        }
     }
 
     /**
@@ -804,85 +795,74 @@ public final class RtTerrain {
         return Math.max(1, mc.options.getEffectiveRenderDistance());
     }
 
-    /**
-     * Grow the Voxy-to-vanilla handoff through complete Chebyshev rings. A single missing column stops
-     * the boundary before that ring, so the any-hit shader can never discard the only geometry covering
-     * a hole while vanilla's asynchronous mesher is still catching up.
-     */
-    private void updateDistantHandoffRadius(double playerX, double playerZ, int pcx, int pcz,
-                                            int maxRadius, int loY, int hiY) {
-        int readyRadius = -1;
-        for (int ring = 0; ring <= maxRadius; ring++) {
-            if (!isReadyColumnRing(pcx, pcz, ring, loY, hiY)) {
-                break;
-            }
-            readyRadius = ring;
+    private int writeReadyMask(ByteBuffer dst) {
+        if (!windowValid) {
+            return 0;
         }
-        distantHandoffPcx = pcx;
-        distantHandoffPcz = pcz;
-        distantReadyChunkRadius = readyRadius;
-        refreshDistantHandoffRadius(playerX, playerZ);
+        if (distantReadyMaskDirty) {
+            rebuildReadyMask();
+            distantReadyMaskDirty = false;
+        }
+        int sizeX = windowRadius * 2 + 1;
+        int sizeY = windowHiY - windowLoY + 1;
+        int sizeZ = sizeX;
+        int bytes = 32 + distantReadyMaskWords.length * Integer.BYTES;
+        if (dst.capacity() < bytes) {
+            throw new IllegalArgumentException("Distant readiness mask requires " + bytes
+                    + " bytes, ring slice has " + dst.capacity());
+        }
+        int minScx = windowPcx - windowRadius;
+        int minScz = windowPcz - windowRadius;
+        dst.putInt(0, minScx * 16 - blockX);
+        dst.putInt(4, windowLoY * 16 - blockY);
+        dst.putInt(8, minScz * 16 - blockZ);
+        dst.putInt(12, sizeX);
+        dst.putInt(16, sizeY);
+        dst.putInt(20, sizeZ);
+        dst.putInt(24, distantReadyMaskWords.length);
+        dst.putInt(28, 0x43535452); // "CSTR": reject an invalid/stale pointer in shader diagnostics.
+        for (int i = 0; i < distantReadyMaskWords.length; i++) {
+            dst.putInt(32 + i * Integer.BYTES, distantReadyMaskWords[i]);
+        }
+        return bytes;
     }
 
-    private void refreshDistantHandoffRadius(double playerX, double playerZ) {
-        distantHandoffRadiusBlocks = inscribedReadyRadiusBlocks(
-                playerX, playerZ, distantHandoffPcx, distantHandoffPcz,
-                distantReadyChunkRadius);
+    private void rebuildReadyMask() {
+        if (!windowValid) {
+            distantReadyMaskWords = new int[0];
+            return;
+        }
+        int sizeX = windowRadius * 2 + 1;
+        int sizeY = windowHiY - windowLoY + 1;
+        int sizeZ = sizeX;
+        int bitCount = Math.multiplyExact(Math.multiplyExact(sizeX, sizeY), sizeZ);
+        int wordCount = (bitCount + 31) >>> 5;
+        if (distantReadyMaskWords.length != wordCount) {
+            distantReadyMaskWords = new int[wordCount];
+        } else {
+            Arrays.fill(distantReadyMaskWords, 0);
+        }
+        int minScx = windowPcx - windowRadius;
+        int minScz = windowPcz - windowRadius;
+        for (LongIterator it = desired.iterator(); it.hasNext(); ) {
+            long key = it.nextLong();
+            if (!empty.contains(key)
+                    && !(resident.containsKey(key) && published.contains(key))) {
+                continue;
+            }
+            int x = sectionX(key) - minScx;
+            int y = sectionY(key) - windowLoY;
+            int z = sectionZ(key) - minScz;
+            if (x < 0 || x >= sizeX || y < 0 || y >= sizeY || z < 0 || z >= sizeZ) {
+                continue;
+            }
+            int bit = readyMaskBitIndex(x, y, z, sizeX, sizeZ);
+            distantReadyMaskWords[bit >>> 5] |= 1 << (bit & 31);
+        }
     }
 
-    private boolean isReadyColumnRing(int pcx, int pcz, int ring, int loY, int hiY) {
-        if (ring == 0) {
-            return isColumnFullyReady(pcx, pcz, loY, hiY);
-        }
-        int minX = pcx - ring;
-        int maxX = pcx + ring;
-        int minZ = pcz - ring;
-        int maxZ = pcz + ring;
-        for (int scx = minX; scx <= maxX; scx++) {
-            if (!isColumnFullyReady(scx, minZ, loY, hiY)
-                    || !isColumnFullyReady(scx, maxZ, loY, hiY)) {
-                return false;
-            }
-        }
-        for (int scz = minZ + 1; scz < maxZ; scz++) {
-            if (!isColumnFullyReady(minX, scz, loY, hiY)
-                    || !isColumnFullyReady(maxX, scz, loY, hiY)) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    private boolean isColumnFullyReady(int scx, int scz, int loY, int hiY) {
-        if (!loadedColumns.contains(columnKey(scx, scz))) {
-            return false;
-        }
-        for (int scy = loY; scy <= hiY; scy++) {
-            long key = sectionKey(scx, scy, scz);
-            if (!desired.contains(key)
-                    || (!empty.contains(key)
-                    && !(resident.containsKey(key) && published.contains(key)))) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    static float inscribedReadyRadiusBlocks(double playerX, double playerZ,
-                                            int pcx, int pcz, int readyChunkRadius) {
-        if (readyChunkRadius < 0) {
-            return 0.0f;
-        }
-        double minX = ((long) pcx - readyChunkRadius) * 16.0;
-        double maxX = ((long) pcx + readyChunkRadius + 1L) * 16.0;
-        double minZ = ((long) pcz - readyChunkRadius) * 16.0;
-        double maxZ = ((long) pcz + readyChunkRadius + 1L) * 16.0;
-        double nearestEdge = Math.min(
-                Math.min(playerX - minX, maxX - playerX),
-                Math.min(playerZ - minZ, maxZ - playerZ));
-        // Keep the camera-centred shader square half a block inside the proven chunk rectangle. A hit
-        // exactly on an outer chunk face can belong to the not-yet-ready neighbour.
-        return (float) Math.max(0.0, nearestEdge - 0.5);
+    static int readyMaskBitIndex(int x, int y, int z, int sizeX, int sizeZ) {
+        return (y * sizeZ + z) * sizeX + x;
     }
 
     private void drainDirty() {
@@ -1346,7 +1326,7 @@ public final class RtTerrain {
             inFlight.remove(task.key);
             inFlightTasks.remove(task.key);
             long dirtyGroup = inFlightDirtyGroup.remove(task.key);
-            distantHandoffDirty = true;
+            distantReadyMaskDirty = true;
             if (result.failure() != null) {
                 if (result.prepared() != null) {
                     destroyPreparedSection(result.prepared());
@@ -1681,9 +1661,8 @@ public final class RtTerrain {
 
     /** Full teardown (world exit / shutdown): drain the GPU, then free everything incl. an in-flight build. */
     private void clear(RtContext ctx, boolean shutdown) {
-        distantHandoffRadiusBlocks = 0.0f;
-        distantHandoffDirty = true;
-        distantReadyChunkRadius = -1;
+        distantReadyMaskWords = new int[0];
+        distantReadyMaskDirty = true;
         if (!shutdown) {
             clearAsync(ctx);
             return;
@@ -1765,9 +1744,8 @@ public final class RtTerrain {
      * as unpublished resources in {@link #completeTask(SectionResult)}.
      */
     private void clearAsync(RtContext ctx) {
-        distantHandoffRadiusBlocks = 0.0f;
-        distantHandoffDirty = true;
-        distantReadyChunkRadius = -1;
+        distantReadyMaskWords = new int[0];
+        distantReadyMaskDirty = true;
         ctx.gpuExecutor().throwIfFailed();
         terrainEpoch++;
 

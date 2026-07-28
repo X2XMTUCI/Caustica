@@ -66,6 +66,7 @@ import dev.comfyfluffy.caustica.rt.pipeline.RtPipeline;
 import dev.comfyfluffy.caustica.rt.terrain.RtTerrain;
 
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.LongBuffer;
 
 /**
@@ -92,6 +93,10 @@ public final class RtComposite {
     // WorldPushData and its serializer are generated from Slang's reflected Std430DataLayout. Java never
     // owns or calculates a shader byte offset, struct size, array stride, or fixed-array capacity.
     private static final int WORLD_PUSH_SIZE = WorldPushData.BYTE_SIZE;
+    private static final int READY_MASK_OFFSET = (WORLD_PUSH_SIZE + 15) & ~15;
+    // Covers a 257x257x48-section window (render distance 128) with room to spare.
+    private static final int READY_MASK_CAPACITY = 512 * 1024;
+    private static final int WORLD_PUSH_BUFFER_SIZE = READY_MASK_OFFSET + READY_MASK_CAPACITY;
     // Real inline push constants (fast constant-bank reads), separate from the WorldPush BDA ring above.
     // Hot addresses/frameIndex and raygen's debugView avoid unnecessary global-memory dereferences;
     // WorldPushConstantsData is generated from the same Slang module and owns this second ABI as well.
@@ -518,7 +523,7 @@ public final class RtComposite {
             if (pushRing == null) {
                 pushRing = new RtBuffer[PUSH_RING];
                 for (int i = 0; i < PUSH_RING; i++) {
-                    pushRing[i] = ctx.createBuffer(WORLD_PUSH_SIZE,
+                    pushRing[i] = ctx.createBuffer(WORLD_PUSH_BUFFER_SIZE,
                             VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, "rt world push " + i);
                 }
             }
@@ -787,6 +792,12 @@ public final class RtComposite {
             pushSlot = (pushSlot + 1) % PUSH_RING;
             RtBuffer pushBuf = pushRing[pushSlot];
             ByteBuffer push = MemoryUtil.memByteBuffer(pushBuf.mapped, WORLD_PUSH_SIZE);
+            ByteBuffer readyMask = MemoryUtil.memByteBuffer(
+                    pushBuf.mapped + READY_MASK_OFFSET, READY_MASK_CAPACITY)
+                    .order(ByteOrder.nativeOrder());
+            int readyMaskBytes = RtTerrain.writeDistantReadyMask(readyMask);
+            long readyMaskAddress = readyMaskBytes == 0
+                    ? 0L : pushBuf.deviceAddress + READY_MASK_OFFSET;
             frameInvViewProj.set(frameProjection).mul(frameViewRotation).invert();
             // flags: PBR BRDF (bit 1, always on) + camera-in-water (so the path tracer starts in the water
             // medium when the eye is submerged, fixing the air→water first-segment orientation).
@@ -828,8 +839,7 @@ public final class RtComposite {
             // float precision). hitPos.xz (rebased) + anchor reconstructs a world-pinned coordinate, so the
             // ripple pattern stays fixed in the world as the player moves and the rebase origin shifts.
             Float4 waterAnchor = new Float4(terrain.blockX & WATER_ANCHOR_MASK,
-                    terrain.blockZ & WATER_ANCHOR_MASK,
-                    RtTerrain.distantHandoffRadiusBlocks(), 0f);
+                    terrain.blockZ & WATER_ANCHOR_MASK, 0f, 0f);
 
             // Rebuild the TLAS this frame from static section instances merged with dynamic entity
             // instances, bind it into the pipeline's descriptor ring, record the build, then barrier so
@@ -875,8 +885,8 @@ public final class RtComposite {
                     fe.geomTableAddr(),
                     flags,
                     maxBounces(),
-                    0,
-                    0,
+                    (int) readyMaskAddress,
+                    (int) (readyMaskAddress >>> 32),
                     sky.sunDir(),
                     sky.lightDir(),
                     sky.lightRadiance(),
@@ -896,7 +906,7 @@ public final class RtComposite {
                     fogParams,
                     fogControl
             ).write(push);
-            pushBuf.flush(0L, WORLD_PUSH_SIZE);
+            pushBuf.flush(0L, Math.max(WORLD_PUSH_SIZE, READY_MASK_OFFSET + readyMaskBytes));
             // Upload any entity textures registered this frame into the bindless set before the trace.
             RtEntityTextures.INSTANCE.uploadPending(active, atlasSampler(ctx));
             // Build the entity BLAS this frame, then the TLAS that references them (+ the already-built

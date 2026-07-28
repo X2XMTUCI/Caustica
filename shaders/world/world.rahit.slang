@@ -50,6 +50,29 @@ float alphaDitherThreshold(uint salt) {
     return frac(base + float((pc.frameIndex + salt) & 255u) * 0.61803398875);
 }
 
+bool vanillaRtSectionReady(float3 hitPos, WorldPush worldPush) {
+    uint64_t maskAddr = uint64_t(worldPush.sunVectorPad0)
+            | (uint64_t(worldPush.sunVectorPad1) << 32);
+    if (maskAddr == 0) {
+        return false;
+    }
+    ConstPtr<uint> mask = ConstPtr<uint>(maskAddr);
+    if (mask[7] != 0x43535452u) {
+        return false;
+    }
+    int3 minBlock = int3(asint(mask[0]), asint(mask[1]), asint(mask[2]));
+    uint3 size = uint3(mask[3], mask[4], mask[5]);
+    // Probe just inside the surface along the ray. At a section boundary this selects the section
+    // containing the solid represented by the Voxy face rather than the empty section in front of it.
+    int3 cell = int3(floor((hitPos + WorldRayDirection() * 0.01 - float3(minBlock)) / 16.0));
+    if (any(cell < int3(0)) || any(cell >= int3(size))) {
+        return false;
+    }
+    uint bit = (uint(cell.y) * size.z + uint(cell.z)) * size.x + uint(cell.x);
+    uint word = bit >> 5;
+    return word < mask[6] && (mask[8 + word] & (1u << (bit & 31u))) != 0u;
+}
+
 [shader("anyhit")]
 void main(inout float4 shadowVis, in BuiltInTriangleIntersectionAttributes attr) {
     uint pid = PrimitiveIndex();
@@ -60,9 +83,8 @@ void main(inout float4 shadowVis, in BuiltInTriangleIntersectionAttributes attr)
     if (instanceKind == DH_INSTANCE_KIND) {
         WorldPush worldPush = ConstPtr<WorldPush>(pc.worldPushAddr)[0];
         float3 hitPos = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
-        float2 fromCamera = abs(hitPos.xz - worldPush.camOffset.xz);
-        if (max(fromCamera.x, fromCamera.y) <= worldPush.waterAnchor.z) {
-            // Vanilla terrain is authoritative inside its live render-distance boundary.
+        if (vanillaRtSectionReady(hitPos, worldPush)) {
+            // Suppress this exact Voxy/DH section only after its real RT replacement is published.
             IgnoreHit();
             return;
         }
