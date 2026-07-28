@@ -635,8 +635,11 @@ public final class RtDistantHorizonsTerrain {
             float alpha = (bytes[q + 11] & 0xFF) * (1.0f / 255.0f);
             int rtMaterial = dhRtMaterial(palette, material, transparentPass);
             if (material == DH_MATERIAL_WATER) {
+                // A coarse LOD voxel is a surface approximation, not a watertight water volume. Pass its
+                // source scale to closest-hit so multi-block cells use a thin dielectric interface instead
+                // of accumulating Beer-Lambert absorption through artificial 2/4/8-block water cubes.
                 packed.water.addQuad(xyz, r, g, b, rtMaterial, SurfaceKind.WATER,
-                        material, 0.0f, 0.0f);
+                        material, mesh.dataPointWidth(), 0.0f);
             } else if (isDhEmissiveMaterial(material)) {
                 boolean lava = material == DH_MATERIAL_LAVA;
                 // The final two bytes differ slightly between DH renderer revisions but contain its packed

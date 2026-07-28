@@ -453,14 +453,21 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         bool emissive = dhSurface == DH_SURFACE_EMISSIVE;
         bool emissiveGlass = dhSurface == DH_SURFACE_EMISSIVE_GLASS;
         float dhEmission = (emissive || emissiveGlass) ? clamp(asfloat(pr.aux0), 0.0, 4.0) : 0.0;
+        // Multi-block LOD water cells are surface samples, not closed physical volumes. Treating their
+        // artificial cube depth as real water repeatedly applied medium absorption and turned distant
+        // lakes black. Keep exact one-block proxy water volumetric; coarser water is a thin dielectric
+        // that still reflects/refracts and participates in ray-traced visibility without owning a medium.
+        bool thinLodWater = water && asfloat(pr.aux0) > 1.5;
         bool entering = dot(WorldRayDirection(), sourceNormal) < 0.0;
         MaterialHeader dhHeader = ConstPtr<MaterialHeader>(pc.materialTableAddr)[pr.materialId];
 
         payloadDisableParallax(payload);
-        if (glass || emissiveGlass) {
-            float opticalAlpha = clamp(asfloat(emissiveGlass ? pr.aux1 : pr.aux0), 0.04, 0.80);
+        if (glass || emissiveGlass || thinLodWater) {
+            float opticalAlpha = thinLodWater
+                    ? 0.32
+                    : clamp(asfloat(emissiveGlass ? pr.aux1 : pr.aux0), 0.04, 0.80);
             float3 glassTint = glassTransmissionFilter(pr.tint.rgb, opticalAlpha);
-            float ior = max(dhHeader.params.z, 1.45);
+            float ior = thinLodWater ? 1.333 : max(dhHeader.params.z, 1.45);
             float f0Base = (ior - 1.0) / (ior + 1.0);
             float f0Scalar = f0Base * f0Base;
             payload.albedo = glassTint;
@@ -469,8 +476,9 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
             payload.motionPrev = float3(0.0, 0.0, 0.0);
             payload.f0 = float3(f0Scalar, f0Scalar, f0Scalar);
             payloadSetPacked(payload, MATERIAL_GLASS,
-                    clamp(dhHeader.params.x, 0.025, 0.16), 0.0, dhEmission, 0.0,
-                    -ior, max(dhHeader.params.w, 0.97),
+                    thinLodWater ? 0.055 : clamp(dhHeader.params.x, 0.025, 0.16),
+                    0.0, dhEmission, 0.0,
+                    -ior, thinLodWater ? 0.985 : max(dhHeader.params.w, 0.97),
                     emissiveGlass ? EMISSION_SOURCE_UNIFORM : EMISSION_SOURCE_NONE);
             return;
         }
