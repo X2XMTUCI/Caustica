@@ -453,11 +453,12 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         bool emissive = dhSurface == DH_SURFACE_EMISSIVE;
         bool emissiveGlass = dhSurface == DH_SURFACE_EMISSIVE_GLASS;
         float dhEmission = (emissive || emissiveGlass) ? clamp(asfloat(pr.aux0), 0.0, 4.0) : 0.0;
-        // Multi-block LOD water cells are surface samples, not closed physical volumes. Treating their
-        // artificial cube depth as real water repeatedly applied medium absorption and turned distant
-        // lakes black. Keep exact one-block proxy water volumetric; coarser water is a thin dielectric
-        // that still reflects/refracts and participates in ray-traced visibility without owning a medium.
-        bool thinLodWater = water && asfloat(pr.aux0) > 1.5;
+        // Every DH/Voxy water primitive is a sparse proxy boundary, even at datapoint width one; it does
+        // not contain the complete watertight column required by the path tracer's medium stack. Treating
+        // the fine hand-off ring as a volume made it accumulate absorption through generated bottom/side
+        // faces and turn into black/grey intersecting sheets. Real loaded-chunk water uses the ordinary
+        // terrain path below and remains fully volumetric.
+        bool thinLodWater = water;
         bool entering = dot(WorldRayDirection(), sourceNormal) < 0.0;
         MaterialHeader dhHeader = ConstPtr<MaterialHeader>(pc.materialTableAddr)[pr.materialId];
 
