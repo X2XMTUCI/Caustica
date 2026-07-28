@@ -5,16 +5,16 @@
 Install both files:
 
 - `caustica-0.1.0-voxy-compat.jar`
-  - Size: 40,080,851 bytes
-  - SHA-256: `12DC15355026EEB0EB1C7FC277152BADF644AF5F6D6D5D4F7D17A0AAA2829736`
-- `voxy-0.2.18-beta-caustica.8-mc26.2.jar`
-  - Size: 38,809,809 bytes
-  - SHA-256: `FD9082EF9494092E9FE1B6ED2EC213DDC7A0CCEFE52DC79CC74D53E064EECD00`
+  - Size: 40,080,699 bytes
+  - SHA-256: `B8296989DEC331A942D8C97E3A88B8FA8710F1A183FD6E00A9E07BBFD192FED2`
+- `voxy-0.2.18-beta-caustica.9-mc26.2.jar`
+  - Size: 38,809,841 bytes
+  - SHA-256: `5F5F5C3BC83CC186CE2A1DD71142C4A964FABE8E82D01BCDC2D2450757166CBE`
 
 This Voxy edition is a CPU-side world/LOD provider for Caustica. It does not require Sodium and
 does not start Voxy's standalone raster renderer. Caustica progressively converts Voxy LOD meshes
 to BLAS/TLAS geometry so distant terrain participates in path-traced visibility, lighting and shadows.
-The `.8` build ingests ordinary Fabric client chunks directly, safely hooks optional Chunky
+The `.9` build ingests ordinary Fabric client chunks directly, safely hooks optional Chunky
 pre-generation, and provides `/voxy import current` for existing singleplayer region files;
 none of these paths depends on Sodium. It also fixes the exact Chunky receiver signature used
 by the optional Mixin, preventing a crash while entering a world with Chunky installed. Fine
@@ -30,9 +30,11 @@ actual vanilla render distance with a four-chunk hand-off margin, distant coarse
 prioritized for fast horizon coverage, material classification is cached once per voxel, and
 opaque/transparent slices from one section share a bounded BLAS whenever possible.
 Different flowing/waterlogged states of one fluid now cull their internal faces as a continuous
-body. Coarse multi-block water uses a ray-traced thin dielectric boundary rather than pretending
-each LOD voxel is a closed volume, preventing repeated medium transitions and black distant lakes.
-States without a Minecraft MapColor use a stable per-state fallback instead of literal mid-grey.
+body, and hidden fluid faces against opaque lake beds and banks are omitted. Every Voxy water LOD
+uses a ray-traced thin dielectric boundary rather than pretending sparse proxy voxels form a closed
+volume, preventing repeated medium transitions, black intersecting sheets and grey distant lakes.
+Real loaded-chunk water remains volumetric. States without a Minecraft MapColor use a stable
+per-state fallback instead of literal mid-grey.
 
 Remove any other Voxy JAR from the `mods` folder. Sodium is not required by this build.
 
