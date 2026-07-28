@@ -5,16 +5,19 @@
 Install both files:
 
 - `caustica-0.1.0-voxy-compat.jar`
-  - Size: 40,081,886 bytes
-  - SHA-256: `381308561CF44465A82D59EE8E048C7AD473AE22B65526A821EEB011B6ED0F59`
-- `voxy-0.2.18-beta-caustica.10-mc26.2.jar`
-  - Size: 38,810,012 bytes
-  - SHA-256: `3B333CB0A6BDCF2EBA9A6E16AEF89701C6ED00B4655FCF3A8D6126938EB9A520`
+  - Size: 40,084,118 bytes
+  - SHA-256: `5565EE48975DA1CF7BC851136366870750025E10EF1A06FEC7BF8A0C5711FF97`
+- `voxy-0.2.18-beta-caustica.11-mc26.2.jar`
+  - Size: 38,810,490 bytes
+  - SHA-256: `1FC472DA6C3986D74E68EBF794B2D234BDF9CD9FD41E0E13BB4E860FF1EF516B`
 
 This Voxy edition is a CPU-side world/LOD provider for Caustica. It does not require Sodium and
 does not start Voxy's standalone raster renderer. Caustica progressively converts Voxy LOD meshes
 to BLAS/TLAS geometry so distant terrain participates in path-traced visibility, lighting and shadows.
-The `.10` build ingests ordinary Fabric client chunks directly, safely hooks optional Chunky
+The `.11` build adds live Voxy controls to Caustica's Video Settings screen: enable/disable,
+new-chunk ingestion, a stepped 32-512 chunk LOD distance, and a bounded rebuild button. Changes
+are saved to Voxy's own config and rebuild the desired LOD set without re-entering the world.
+It ingests ordinary Fabric client chunks directly, safely hooks optional Chunky
 pre-generation, and provides `/voxy import current` for existing singleplayer region files;
 none of these paths depends on Sodium. It also fixes the exact Chunky receiver signature used
 by the optional Mixin, preventing a crash while entering a world with Chunky installed. Fine
