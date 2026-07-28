@@ -185,6 +185,14 @@ public final class RtTerrain {
     private int windowRadius;
     private int windowLoY;
     private int windowHiY;
+    // Largest camera-centred square that is wholly backed by published vanilla RT sections. Distant
+    // geometry is suppressed only inside this proven-ready area, never merely because the configured
+    // render distance says that vanilla chunks should eventually exist there.
+    private float distantHandoffRadiusBlocks;
+    private boolean distantHandoffDirty = true;
+    private int distantHandoffPcx;
+    private int distantHandoffPcz;
+    private int distantReadyChunkRadius = -1;
     // When the last streaming pass ran on a render frame — the tick fallback watches this (see
     // STREAM_FALLBACK_AFTER_NANOS).
     private long lastFrameStreamNanos;
@@ -212,6 +220,11 @@ public final class RtTerrain {
         int scz = SectionPos.blockToSectionCoord(blockPos.getZ());
         long key = sectionKey(scx, scy, scz);
         return INSTANCE.ready && ((INSTANCE.resident.containsKey(key) && INSTANCE.published.contains(key)) || INSTANCE.empty.contains(key));
+    }
+
+    /** Safe near-field radius in which Voxy/DH hits may be replaced by real vanilla RT geometry. */
+    public static float distantHandoffRadiusBlocks() {
+        return INSTANCE.distantHandoffRadiusBlocks;
     }
 
     /**
@@ -353,6 +366,8 @@ public final class RtTerrain {
         if (System.nanoTime() - lastFrameStreamNanos > STREAM_FALLBACK_AFTER_NANOS) {
             stream(ctx);
         }
+        updateDistantHandoffRadius(mc.player.getX(), mc.player.getZ(), pcx, pcz, r, loY, hiY);
+        distantHandoffDirty = false;
     }
 
     /** The per-render-frame entry point: run one count-bounded streaming pass. */
@@ -363,6 +378,16 @@ public final class RtTerrain {
         }
         lastFrameStreamNanos = System.nanoTime();
         stream(ctx);
+        if (distantHandoffDirty && windowValid) {
+            updateDistantHandoffRadius(mc.player.getX(), mc.player.getZ(),
+                    mc.player.getBlockX() >> 4, mc.player.getBlockZ() >> 4,
+                    windowRadius, windowLoY, windowHiY);
+            distantHandoffDirty = false;
+        } else {
+            // Camera movement within a chunk changes the largest camera-centred square even though the
+            // expensive published-column readiness result itself is unchanged.
+            refreshDistantHandoffRadius(mc.player.getX(), mc.player.getZ());
+        }
     }
 
     /**
@@ -777,6 +802,87 @@ public final class RtTerrain {
 
     private int horizontalChunks(Minecraft mc) {
         return Math.max(1, mc.options.getEffectiveRenderDistance());
+    }
+
+    /**
+     * Grow the Voxy-to-vanilla handoff through complete Chebyshev rings. A single missing column stops
+     * the boundary before that ring, so the any-hit shader can never discard the only geometry covering
+     * a hole while vanilla's asynchronous mesher is still catching up.
+     */
+    private void updateDistantHandoffRadius(double playerX, double playerZ, int pcx, int pcz,
+                                            int maxRadius, int loY, int hiY) {
+        int readyRadius = -1;
+        for (int ring = 0; ring <= maxRadius; ring++) {
+            if (!isReadyColumnRing(pcx, pcz, ring, loY, hiY)) {
+                break;
+            }
+            readyRadius = ring;
+        }
+        distantHandoffPcx = pcx;
+        distantHandoffPcz = pcz;
+        distantReadyChunkRadius = readyRadius;
+        refreshDistantHandoffRadius(playerX, playerZ);
+    }
+
+    private void refreshDistantHandoffRadius(double playerX, double playerZ) {
+        distantHandoffRadiusBlocks = inscribedReadyRadiusBlocks(
+                playerX, playerZ, distantHandoffPcx, distantHandoffPcz,
+                distantReadyChunkRadius);
+    }
+
+    private boolean isReadyColumnRing(int pcx, int pcz, int ring, int loY, int hiY) {
+        if (ring == 0) {
+            return isColumnFullyReady(pcx, pcz, loY, hiY);
+        }
+        int minX = pcx - ring;
+        int maxX = pcx + ring;
+        int minZ = pcz - ring;
+        int maxZ = pcz + ring;
+        for (int scx = minX; scx <= maxX; scx++) {
+            if (!isColumnFullyReady(scx, minZ, loY, hiY)
+                    || !isColumnFullyReady(scx, maxZ, loY, hiY)) {
+                return false;
+            }
+        }
+        for (int scz = minZ + 1; scz < maxZ; scz++) {
+            if (!isColumnFullyReady(minX, scz, loY, hiY)
+                    || !isColumnFullyReady(maxX, scz, loY, hiY)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean isColumnFullyReady(int scx, int scz, int loY, int hiY) {
+        if (!loadedColumns.contains(columnKey(scx, scz))) {
+            return false;
+        }
+        for (int scy = loY; scy <= hiY; scy++) {
+            long key = sectionKey(scx, scy, scz);
+            if (!desired.contains(key)
+                    || (!empty.contains(key)
+                    && !(resident.containsKey(key) && published.contains(key)))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static float inscribedReadyRadiusBlocks(double playerX, double playerZ,
+                                            int pcx, int pcz, int readyChunkRadius) {
+        if (readyChunkRadius < 0) {
+            return 0.0f;
+        }
+        double minX = ((long) pcx - readyChunkRadius) * 16.0;
+        double maxX = ((long) pcx + readyChunkRadius + 1L) * 16.0;
+        double minZ = ((long) pcz - readyChunkRadius) * 16.0;
+        double maxZ = ((long) pcz + readyChunkRadius + 1L) * 16.0;
+        double nearestEdge = Math.min(
+                Math.min(playerX - minX, maxX - playerX),
+                Math.min(playerZ - minZ, maxZ - playerZ));
+        // Keep the camera-centred shader square half a block inside the proven chunk rectangle. A hit
+        // exactly on an outer chunk face can belong to the not-yet-ready neighbour.
+        return (float) Math.max(0.0, nearestEdge - 0.5);
     }
 
     private void drainDirty() {
@@ -1240,6 +1346,7 @@ public final class RtTerrain {
             inFlight.remove(task.key);
             inFlightTasks.remove(task.key);
             long dirtyGroup = inFlightDirtyGroup.remove(task.key);
+            distantHandoffDirty = true;
             if (result.failure() != null) {
                 if (result.prepared() != null) {
                     destroyPreparedSection(result.prepared());
@@ -1574,6 +1681,9 @@ public final class RtTerrain {
 
     /** Full teardown (world exit / shutdown): drain the GPU, then free everything incl. an in-flight build. */
     private void clear(RtContext ctx, boolean shutdown) {
+        distantHandoffRadiusBlocks = 0.0f;
+        distantHandoffDirty = true;
+        distantReadyChunkRadius = -1;
         if (!shutdown) {
             clearAsync(ctx);
             return;
@@ -1655,6 +1765,9 @@ public final class RtTerrain {
      * as unpublished resources in {@link #completeTask(SectionResult)}.
      */
     private void clearAsync(RtContext ctx) {
+        distantHandoffRadiusBlocks = 0.0f;
+        distantHandoffDirty = true;
+        distantReadyChunkRadius = -1;
         ctx.gpuExecutor().throwIfFailed();
         terrainEpoch++;
 

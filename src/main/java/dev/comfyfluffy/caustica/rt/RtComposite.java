@@ -829,7 +829,7 @@ public final class RtComposite {
             // ripple pattern stays fixed in the world as the player moves and the rebase origin shifts.
             Float4 waterAnchor = new Float4(terrain.blockX & WATER_ANCHOR_MASK,
                     terrain.blockZ & WATER_ANCHOR_MASK,
-                    Minecraft.getInstance().options.renderDistance().get() * 16f, 0f);
+                    RtTerrain.distantHandoffRadiusBlocks(), 0f);
 
             // Rebuild the TLAS this frame from static section instances merged with dynamic entity
             // instances, bind it into the pipeline's descriptor ring, record the build, then barrier so
