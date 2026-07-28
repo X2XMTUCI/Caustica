@@ -265,13 +265,15 @@ public final class DistantHorizonsCompat {
     /** Current DH horizontal quality. Changes are polled by the RT proxy to trigger immediate refinement. */
     public static LodQuality lodQuality() {
         if (!enabled()) return new LodQuality(0L, 16, 2, "UNKNOWN", "UNKNOWN");
-        if (!VoxyCompat.meshes().isEmpty() || !LOADED) {
-            int maxWidth = 1;
-            for (LodMesh mesh : VoxyCompat.meshes()) {
-                maxWidth = Math.max(maxWidth, mesh.dataPointWidth());
-            }
-            long signature = 0x564F585900000000L ^ maxWidth ^ ((long) VoxyCompat.renderDistanceChunks() << 16);
-            return new LodQuality(signature, maxWidth, 4, "VOXY_" + maxWidth, "DYNAMIC");
+        if (VoxyCompat.enabled()) {
+            // The set of widths in a Voxy snapshot is streaming availability, not a user quality setting.
+            // Treating its transient maximum as configuration made every newly-arrived 2/4/8-block ring
+            // cancel thousands of in-flight BLAS builds and restart the complete proxy. Voxy's finest
+            // configured representation is always one block; only an actual distance change is a new
+            // quality signature.
+            int distance = Math.max(1, VoxyCompat.renderDistanceChunks());
+            long signature = 0x564F585900000000L ^ ((long) distance << 16);
+            return new LodQuality(signature, 1, 4, "VOXY_STREAMED", "DYNAMIC");
         }
         try {
             return Api.INSTANCE.lodQuality();

@@ -54,7 +54,7 @@ public final class RtDistantHorizonsTerrain {
     private static final int MAX_BUILD_QUADS = 131_072;
     /** Publish a useful near-field proxy quickly, then checkpoint larger groups while the rest builds. */
     private static final int INITIAL_PROGRESS_BATCHES = 1;
-    private static final int STEADY_PROGRESS_BATCHES = 8;
+    private static final int STEADY_PROGRESS_BATCHES = 32;
     private static final long PROGRESS_PUBLISH_NANOS = 1_000_000_000L;
     // EDhApiBlockMaterial shader indices. Keep these explicit rather than depending on the optional
     // DH API at compile time: the native VBO stores the material as this single byte. Preserve the full
@@ -347,18 +347,46 @@ public final class RtDistantHorizonsTerrain {
             ArrayList<DhSlice> slices = new ArrayList<>();
             appendDhSlices(mesh, mesh.opaque(), false, slices);
             appendDhSlices(mesh, mesh.transparent(), true, slices);
-            for (int batchIndex = 0; batchIndex < slices.size(); batchIndex++) {
-                plan.add(PlannedBatch.build(batchKey(mesh.key(), batchIndex), mesh.key(), mesh.version(),
-                        mesh.originX(), mesh.originZ(), mesh.width(), mesh.dataPointWidth(),
-                        slices.get(batchIndex)));
-            }
-            rebuiltBatches += slices.size();
+            rebuiltBatches += appendPlannedBuilds(plan, mesh, slices);
         }
         CausticaMod.LOGGER.info(
                 "DH RT refresh plan: {} active source meshes ({} reused), {} reused + {} rebuilt bounded BLAS batches; quality {} / {}, target datapoint {} blocks",
                 selectedMeshes, reusedMeshes, reusedBatches, rebuiltBatches,
                 quality.maxHorizontalResolution(), quality.horizontalQuality(), quality.maxDataPointWidth());
         return plan;
+    }
+
+    /**
+     * Combine compatible slices from one source section up to the existing quad budget. Voxy normally
+     * publishes opaque and transparent arrays separately even when both are small; building them as two
+     * BLASes nearly doubled startup work and TLAS instance count. They already share one source version
+     * and {@link #packDhBatch} supports mixed material buckets, so one bounded BLAS is equivalent.
+     */
+    private static int appendPlannedBuilds(List<PlannedBatch> plan,
+                                           DistantHorizonsCompat.LodMesh mesh,
+                                           List<DhSlice> slices) {
+        if (slices.isEmpty()) return 0;
+        ArrayList<DhSlice> group = new ArrayList<>(2);
+        int groupQuads = 0;
+        int batchIndex = 0;
+        for (DhSlice slice : slices) {
+            int sliceQuads = slice.counts.total();
+            if (!group.isEmpty() && groupQuads + sliceQuads > MAX_BUILD_QUADS) {
+                plan.add(PlannedBatch.build(batchKey(mesh.key(), batchIndex++), mesh.key(), mesh.version(),
+                        mesh.originX(), mesh.originZ(), mesh.width(), mesh.dataPointWidth(),
+                        List.copyOf(group)));
+                group.clear();
+                groupQuads = 0;
+            }
+            group.add(slice);
+            groupQuads += sliceQuads;
+        }
+        if (!group.isEmpty()) {
+            plan.add(PlannedBatch.build(batchKey(mesh.key(), batchIndex++), mesh.key(), mesh.version(),
+                    mesh.originX(), mesh.originZ(), mesh.width(), mesh.dataPointWidth(),
+                    List.copyOf(group)));
+        }
+        return batchIndex;
     }
 
     private long refreshDelayNanos(long now) {
@@ -753,7 +781,7 @@ public final class RtDistantHorizonsTerrain {
                 // Exactly one bounded quad batch is expanded into final float/int arrays at a time. The old
                 // implementation expanded every active DH section up front, temporarily consuming many GB
                 // of Java heap and causing the 5-10 second system-wide stalls reported on large horizons.
-                packed = packDhBatch(List.of(item.slice), item.originX, item.originZ, session.materials);
+                packed = packDhBatch(item.slices, item.originX, item.originZ, session.materials);
             } catch (Throwable t) {
                 failure = t;
             } finally {
@@ -1125,11 +1153,11 @@ public final class RtDistantHorizonsTerrain {
     }
 
     private record PlannedBatch(long batchKey, long sourceKey, long sourceVersion, int originX, int originZ,
-                                int sourceWidth, int dataPointWidth, DhSlice slice, GeomEntry reused) {
+                                int sourceWidth, int dataPointWidth, List<DhSlice> slices, GeomEntry reused) {
         static PlannedBatch build(long batchKey, long sourceKey, long sourceVersion, int originX, int originZ,
-                                  int sourceWidth, int dataPointWidth, DhSlice slice) {
+                                  int sourceWidth, int dataPointWidth, List<DhSlice> slices) {
             return new PlannedBatch(batchKey, sourceKey, sourceVersion, originX, originZ,
-                    sourceWidth, dataPointWidth, slice, null);
+                    sourceWidth, dataPointWidth, slices, null);
         }
 
         static PlannedBatch reuse(GeomEntry entry) {
