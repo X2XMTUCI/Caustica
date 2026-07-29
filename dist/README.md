@@ -5,8 +5,8 @@
 Install both files:
 
 - `caustica-0.1.0-voxy-compat.jar`
-  - Size: 40,202,000 bytes
-  - SHA-256: `E32D43CCBE0F4981B5F0D00027BDA02E3E3055F951172EEB5B0433D5803C8FC3`
+  - Size: 40,201,858 bytes
+  - SHA-256: `64CB1EEB7D10D04E5059DF468CBB14451F48D55A0EFB08FE8378E73CAA47C584`
 - `voxy-0.2.18-beta-caustica.11-mc26.2.jar`
   - Size: 38,810,490 bytes
   - SHA-256: `1FC472DA6C3986D74E68EBF794B2D234BDF9CD9FD41E0E13BB4E860FF1EF516B`
@@ -23,9 +23,11 @@ light instead of treating the whole texture as uniformly emissive. Fresh candida
 path vertex; validated temporal reservoirs and optional four-neighbour spatial reuse remain on the
 stable primary receiver. Celestial and local-emissive candidates use independent domains, preventing
 an occluded sun from suppressing indoor emitters or transferring its normalization into torch
-fireflies. Video Settings expose the ReSTIR toggle, candidate count and spatial-reuse toggle. History
-is invalidated on geometry publication/rebase, world, resource-pack, resolution and enable-state
-changes.
+fireflies. Materials that merely provide a PBR specular map but have no non-zero emission channel are
+excluded from the bounded light list, leaving its capacity for actual torches, lava and authored
+emissive texels. Video Settings expose the ReSTIR toggle, candidate count and spatial-reuse toggle.
+History is invalidated on geometry publication/rebase, world, resource-pack, resolution and
+enable-state changes.
 The `.11` build adds live Voxy controls to Caustica's Video Settings screen: enable/disable,
 new-chunk ingestion, a stepped 32-512 chunk LOD distance, and a bounded rebuild button. Changes
 are saved to Voxy's own config and rebuild the desired LOD set without re-entering the world.
