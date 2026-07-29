@@ -5,8 +5,8 @@
 Install both files:
 
 - `caustica-0.1.0-voxy-compat.jar`
-  - Size: 40,215,631 bytes
-  - SHA-256: `5695DC8E34E1CB9B4927F8E0341AC677AE5A184FF61A732EBF42F6273431CB6E`
+  - Size: 40,204,319 bytes
+  - SHA-256: `B60409611CB9A3BBD877366C6B44D49E51BEC410B183AC1DA01D3B3D7BD2E825`
 - `voxy-0.2.18-beta-caustica.11-mc26.2.jar`
   - Size: 38,810,490 bytes
   - SHA-256: `1FC472DA6C3986D74E68EBF794B2D234BDF9CD9FD41E0E13BB4E860FF1EF516B`
@@ -17,9 +17,10 @@ to BLAS/TLAS geometry so distant terrain participates in path-traced visibility,
 The Caustica build routes direct illumination from the analytic sun/moon and all resolved emissive
 geometry through ReSTIR DI. The light list covers real terrain, Distant Horizons/Voxy proxies,
 entities and block entities, including vanilla block emission, LabPBR emission maps, heuristic
-emission textures and configured material overrides. The finally selected point is traced through
-the normal closest-hit material path, so its exact texel mask, tint and occlusion determine the
-light instead of treating the whole texture as uniformly emissive. Fresh candidates run at every
+emission textures and configured material overrides. The selected point is traced through the normal
+closest-hit path for exact geometry, orientation and occlusion. Authored emissive texture energy and
+chromaticity are integrated on the CPU instead of resampling a sparse binary mask at the endpoint:
+this removes the rare 50x-250x samples that appeared as moving white/orange shards. Fresh candidates run at every
 path vertex; validated temporal reservoirs and optional four-neighbour spatial reuse remain on the
 stable primary receiver. Celestial and local-emissive candidates use independent domains, preventing
 an occluded sun from suppressing indoor emitters or transferring its normalization into torch
@@ -34,10 +35,9 @@ from creating rare over-weighted torch samples. Within that domain, triangle sel
 CPU-built CDF weighted by actual triangle area and the compiled material's average emitted power.
 The final endpoint remains fully ray traced, but tiny bright torch quads and sparse emission masks
 no longer produce rare, enormous samples that Ray Reconstruction spreads into white/orange patches
-and structured stripes. Each selected triangle now also carries its original corner UVs and material
-ID. Raygen performs an eight-candidate RIS pass over the actual LabPBR/heuristic/override emission
-mask before tracing one endpoint, retaining exact path-traced visibility while remaining stable even
-with the user-facing ReSTIR candidate count set to one.
+and structured stripes. Average emitted power drives the triangle CDF and cancels analytically
+against the proposal PDF; a packed average chromaticity supplies colour after endpoint validation.
+The estimator is therefore variance-bounded even with the user-facing ReSTIR candidate count set to one.
 The `.11` build adds live Voxy controls to Caustica's Video Settings screen: enable/disable,
 new-chunk ingestion, a stepped 32-512 chunk LOD distance, and a bounded rebuild button. Changes
 are saved to Voxy's own config and rebuild the desired LOD set without re-entering the world.

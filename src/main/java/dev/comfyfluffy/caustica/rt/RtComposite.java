@@ -885,9 +885,10 @@ public final class RtComposite {
     }
 
     /**
-     * Build an area-and-power-weighted lower-bound CDF in p0.w and the reciprocal point PDF in p1.w.
-     * p2.w is the CPU material compiler's average emitted-luminance estimate. The estimate affects only
-     * proposal efficiency: the raygen endpoint trace still evaluates the exact authored texel.
+     * Build an area-and-power-weighted lower-bound CDF in p0.w. Every p1.w receives sqrt(totalWeight):
+     * raygen squares it after tracing the sampled endpoint and combines it with the material's average
+     * emitted chromaticity. Average power then analytically cancels the triangle/point proposal PDF,
+     * avoiding the unbounded texel-mask ratios that previously produced white fireflies.
      */
     private static void finalizeEmissiveDistribution(ByteBuffer dst, int count) {
         double totalWeight = 0.0;
@@ -914,15 +915,13 @@ public final class RtComposite {
         if (!(totalWeight > 0.0) || !Double.isFinite(totalWeight)) {
             return;
         }
+        float encodedTotalWeight = RtEmissiveSampling.encodedTotalWeight(totalWeight);
         for (int entry = 0; entry < count; entry++) {
             int base = entry * EMISSIVE_LIGHT_ENTRY_BYTES;
-            float power = dst.getFloat(base + 44);
             float cdf = entry + 1 == count ? 1.0f
                     : (float) Math.min(1.0, dst.getFloat(base + 12) / totalWeight);
-            float inversePdf = power > 0.0f
-                    ? (float) Math.min(65_500.0, totalWeight / power) : 0.0f;
             dst.putFloat(base + 12, cdf);
-            dst.putFloat(base + 28, inversePdf);
+            dst.putFloat(base + 28, encodedTotalWeight);
         }
     }
 

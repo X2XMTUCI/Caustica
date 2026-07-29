@@ -174,9 +174,9 @@ final class RtTerrainMesher {
      * Extract the actual triangles whose resolved material can emit. Positions remain section/entity
      * local; the owner applies its TLAS translation while filling the frame's ReSTIR light list.
      *
-     * <p>The list is deliberately geometry-only. Raygen traces the finally selected sample back through
-     * the normal closest-hit material path, so LabPBR/override/heuristic texture masks and tint are
-     * evaluated at the exact sampled texel instead of approximating an entire block as uniformly bright.</p>
+     * <p>Raygen traces the selected point through the normal closest-hit material path for geometry,
+     * orientation and visibility. Emitted texture energy is averaged by the material compiler so a
+     * sparse mask cannot turn one rare texel sample into an extreme temporal firefly.</p>
      */
     static float[] extractEmissiveTriangles(float[] positions, int[] indices, float[] uvs, float[] material,
                                              RtMaterialRegistry.Snapshot materials) {

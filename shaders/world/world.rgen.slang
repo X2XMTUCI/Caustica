@@ -83,6 +83,13 @@ float payloadRoughness() { return unpackHalf2(payload.roughMetal).x; }
 float payloadMetalness() { return unpackHalf2(payload.roughMetal).y; }
 float payloadEmission() { return unpackHalf2(payload.emissionSss).x; }
 float payloadSss() { return unpackHalf2(payload.emissionSss).y; }
+float3 payloadAverageEmissionChroma() {
+    uint packed = payload.flags >> 8;
+    float3 chroma = float3(packed & 0xffu, (packed >> 8) & 0xffu,
+            (packed >> 16) & 0xffu) * (1.0 / 255.0);
+    float energy = luminance(chroma);
+    return energy > 1.0e-5 ? chroma / energy : float3(0.0, 0.0, 0.0);
+}
 float payloadIor() { return unpackHalf2(payload.iorTransmission).x; }
 float payloadTransmission() { return unpackHalf2(payload.iorTransmission).y; }
 void payloadSetTraceState(bool showCelestial, float rayConeWidth, float rayConeSpread) {
@@ -473,8 +480,9 @@ float3 sampleSquare(float3 axis, float halfAngle, inout uint s) {
 // CPU extraction supplies real emitting triangles from terrain, DH/Voxy proxies, entities and block
 // entities. A fresh local candidate is a uniform point on one triangle. Reservoir history stores that
 // point rather than a list index, so chunk/entity list reordering cannot retarget an old reservoir.
-// The single selected local sample is traced through the normal closest-hit material path: LabPBR,
-// heuristic and override emission masks are therefore evaluated at the exact sampled texel.
+// The selected local point is traced through the normal closest-hit path for exact geometry,
+// orientation and occlusion. Textured emission is energy-averaged on the CPU: sampling the sparse mask
+// again here created mathematically unbiased but visually catastrophic 50x-250x fireflies.
 static const uint RESTIR_ENABLED = 0x80u;
 static const uint RESTIR_SPATIAL = 0x100u;
 static const uint RESTIR_HISTORY_VALID = 0x200u;
@@ -485,13 +493,12 @@ struct EmissiveTriangle {
     float4 p0;
     float4 p1;
     float4 p2;
-    float4 uv01;    // uv0.xy, uv1.xy
-    float4 uv2Meta; // uv2.xy, asfloat(materialId), primitive fallback emission
+    float4 uv01;    // retained upload ABI; not needed by the variance-bounded estimator
+    float4 uv2Meta; // retained upload ABI; not needed by the variance-bounded estimator
 };
 
 struct RestirSample {
-    // measure < 0: value is a celestial direction. measure > 0: value is an emitter point and measure
-    // is the reciprocal PDF of the CPU-built area-and-emissive-power triangle/point proposal.
+    // measure < 0: celestial direction. measure > 0: emitter point and sqrt(total proposal weight).
     float3 value;
     float measure;
 };
@@ -633,44 +640,14 @@ float restirPHat(RestirSample sample, float3 hitPos, float3 n, float3 v,
     if (sample.measure < 0.0) {
         return max(luminance(response * worldPush.lightRadiance.xyz), 0.0);
     }
-    // A texture-independent scalar target keeps temporal samples valid without storing material/list
-    // indices. Exact emitted RGB, mask, orientation and occlusion are evaluated by the one selected ray.
-    // CPU sampling is proportional to triangle area * average emitted power. Dividing the physical
-    // integrand by that proposal cancels average power and the distribution's common normalization,
-    // so response / distance^2 is the stable texture-independent RIS target. The exact target below
-    // still multiplies by the stored reciprocal PDF and traced texel emission.
+    // CPU sampling is proportional to triangle area * average emitted power. Average power cancels
+    // analytically against that proposal in restirLocalTarget; this geometry-only proxy remains stable
+    // across temporal reuse without retaining a triangle-list index.
     return max(luminance(response) / max(distance * distance, 0.0625), 0.0);
 }
 
 uint64_t restirLightAddress() {
     return uint64_t(worldPush.breakingPad0) | (uint64_t(worldPush.breakingPad1) << 32);
-}
-
-float restirEmissionProxy(EmissiveTriangle triangle, float3 bary) {
-    float2 atlasUv = bary.x * triangle.uv01.xy
-            + bary.y * triangle.uv01.zw + bary.z * triangle.uv2Meta.xy;
-    uint materialId = asuint(triangle.uv2Meta.z);
-    MaterialHeader header = ConstPtr<MaterialHeader>(pc.materialTableAddr)[materialId];
-    float2 localUv = clamp((atlasUv - header.albedoUv.xy) * header.albedoUv.zw,
-            float2(0.0, 0.0), float2(1.0, 1.0));
-    float2 pageUv = header.materialUv.xy + localUv * header.materialUv.zw;
-    uint page = header.texturePage;
-    float fallbackEmission = max(0.0, triangle.uv2Meta.w);
-    float emission = fallbackEmission;
-    if ((header.features & (MATERIAL_FEATURE_SPEC | MATERIAL_FEATURE_HEURISTIC_EMISSION)) != 0u) {
-        float4 surface0 = materialSurface0Tex[NonUniformResourceIndex(page)].SampleLevel(pageUv, 0.0);
-        emission = (header.features & MATERIAL_FEATURE_SPEC) != 0u
-                ? surface0.b : surface0.b * fallbackEmission;
-    }
-    if ((header.features & MATERIAL_FEATURE_OVERRIDE_EMISSION) != 0u) {
-        float4 surface1 = materialSurface1Tex[NonUniformResourceIndex(page)].SampleLevel(pageUv, 0.0);
-        float strength = float((header.features >> MATERIAL_EMISSION_STRENGTH_SHIFT)
-                & MATERIAL_EMISSION_STRENGTH_MASK)
-                * (MATERIAL_MAX_OVERRIDE_EMISSION_STRENGTH / float(MATERIAL_EMISSION_STRENGTH_MASK));
-        emission = surface1.a * strength;
-    }
-    // Keep complete support for POM-displaced texels whose exact endpoint UV can differ slightly.
-    return max(emission, 1.0e-5);
 }
 
 RestirSample restirFreshLocal(inout uint seed) {
@@ -703,29 +680,11 @@ RestirSample restirFreshLocal(inout uint seed) {
     if (!(area > 1.0e-8)) {
         return sample;
     }
-    static const int TEXEL_CANDIDATES = 8;
-    float proxySum = 0.0;
-    float selectedProxy = 0.0;
-    float3 selectedPoint = p0;
-    [unroll]
-    for (int attempt = 0; attempt < TEXEL_CANDIDATES; ++attempt) {
-        float su = sqrt(rndf(seed));
-        float v = rndf(seed);
-        float3 bary = float3(1.0 - su, su * (1.0 - v), su * v);
-        float proxy = restirEmissionProxy(triangle, bary);
-        float nextSum = proxySum + proxy;
-        if (rndf(seed) * nextSum < proxy) {
-            selectedPoint = bary.x * p0 + bary.y * p1 + bary.z * p2;
-            selectedProxy = proxy;
-        }
-        proxySum = nextSum;
-    }
-    if (!(selectedProxy > 0.0 && proxySum > 0.0)) {
-        return sample;
-    }
-    sample.value = selectedPoint;
-    float innerNormalization = proxySum / (float(TEXEL_CANDIDATES) * selectedProxy);
-    sample.measure = min(triangle.p1.w * innerNormalization, 65500.0);
+    float su = sqrt(rndf(seed));
+    float v = rndf(seed);
+    float3 bary = float3(1.0 - su, su * (1.0 - v), su * v);
+    sample.value = bary.x * p0 + bary.y * p1 + bary.z * p2;
+    sample.measure = triangle.p1.w;
     return sample;
 }
 
@@ -951,9 +910,9 @@ float3 visibility(float3 origin, float3 dir, float tmax) {
 
 /**
  * Trace the one selected local-emitter sample through the regular material closest-hit. The endpoint
- * must be emissive and near the sampled surface; an earlier non-emissive hit is an occluder. Returning
- * the payload-derived radiance makes every authored emission texture/mask use exactly the same path as
- * a normal indirect ray.
+ * must be near the sampled surface; an earlier hit is an occluder. The material payload carries the
+ * CPU-averaged emission chromaticity. Combined with the area/power proposal's total weight, this
+ * integrates every authored emission texture without resampling a sparse mask into extreme outliers.
  */
 float3 restirLocalTarget(RestirSample sample, float3 origin, float3 receiverNormal, float3 v,
                          float3 diffAlb, float3 F0, float rough, bool pbr,
@@ -974,8 +933,7 @@ float3 restirLocalTarget(RestirSample sample, float3 origin, float3 receiverNorm
     payloadSetTraceState(false, rayConeWidth, rayConeSpread);
     traceRadianceReordered(CULL_SECONDARY, origin, RAY_TMIN, lightDir, targetDistance + 0.25);
     float hitDistance = payload.hitT;
-    float emission = payloadEmission();
-    float3 emitted = payload.albedo * emission * EMISSIVE_STRENGTH;
+    float3 emittedChroma = payloadAverageEmissionChroma();
     float3 emitterNormal = payload.normal;
     uint emitterMaterial = payloadMaterial();
     payload = receiverPayload;
@@ -984,14 +942,16 @@ float3 restirLocalTarget(RestirSample sample, float3 origin, float3 receiverNorm
     // but reject an arbitrary closer glowing object so the sampled triangle remains the proposal.
     float endpointTolerance = max(0.16, targetDistance * 0.002);
     if (!(hitDistance > 0.0) || abs(hitDistance - targetDistance) > endpointTolerance
-            || emission <= 0.0 || emitterMaterial != MATERIAL_OPAQUE) {
+            || max(emittedChroma.r, max(emittedChroma.g, emittedChroma.b)) <= 0.0
+            || emitterMaterial != MATERIAL_OPAQUE) {
         return float3(0.0, 0.0, 0.0);
     }
     float cosEmitter = max(0.0, dot(emitterNormal, -lightDir));
     if (cosEmitter <= 0.0) {
         return float3(0.0, 0.0, 0.0);
     }
-    return receiverResponse * emitted * cosEmitter * sample.measure
+    float totalProposalWeight = sample.measure * sample.measure;
+    return receiverResponse * emittedChroma * (EMISSIVE_STRENGTH * totalProposalWeight) * cosEmitter
             / max(targetDistance * targetDistance, 0.0625);
 }
 

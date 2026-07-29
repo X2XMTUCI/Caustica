@@ -18,8 +18,10 @@ import world_common;
 [[vk::binding(3, 1)]] Sampler2D materialSurface1Tex[];
 
 void payloadSetPacked(inout Payload payload, uint material, float roughness, float metalness,
-        float emission, float sss, float ior, float transmission, uint emissionSource) {
-    payload.flags = material | (emissionSource << PAYLOAD_EMISSION_SOURCE_SHIFT);
+        float emission, float sss, float ior, float transmission, uint emissionSource,
+        uint emissionChroma) {
+    payload.flags = material | (emissionSource << PAYLOAD_EMISSION_SOURCE_SHIFT)
+            | ((emissionChroma & 0x00FFFFFFu) << 8);
     payload.roughMetal = packHalf2(float2(roughness, metalness));
     payload.emissionSss = packHalf2(float2(emission, sss));
     payload.iorTransmission = packHalf2(float2(ior, transmission));
@@ -478,7 +480,8 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
                     clamp(dhHeader.params.x, 0.025, 0.16),
                     0.0, dhEmission, 0.0,
                     -ior, max(dhHeader.params.w, 0.97),
-                    emissiveGlass ? EMISSION_SOURCE_UNIFORM : EMISSION_SOURCE_NONE);
+                    emissiveGlass ? EMISSION_SOURCE_UNIFORM : EMISSION_SOURCE_NONE,
+                    dhHeader.extensionOffset);
             return;
         }
 
@@ -493,7 +496,7 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
             payload.motionPrev = float3(0.0, 0.0, 0.0);
             payload.f0 = float3(0.02, 0.02, 0.02);
             payloadSetPacked(payload, MATERIAL_WATER, 0.075, 0.0, 0.0, 0.0,
-                    1.333, 0.985, EMISSION_SOURCE_NONE);
+                    1.333, 0.985, EMISSION_SOURCE_NONE, 0u);
             return;
         }
 
@@ -509,7 +512,8 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         payloadSetPacked(payload, water ? MATERIAL_WATER : MATERIAL_OPAQUE,
                 roughness, metalness, dhEmission, sss,
                 water ? 1.333 : max(dhHeader.params.z, 1.0), water ? 1.0 : 0.0,
-                emissive ? EMISSION_SOURCE_UNIFORM : EMISSION_SOURCE_NONE);
+                emissive ? EMISSION_SOURCE_UNIFORM : EMISSION_SOURCE_NONE,
+                dhHeader.extensionOffset);
         if (water && entering) payload.flags |= PAYLOAD_WATER_ENTERING;
         return;
     }
@@ -557,7 +561,7 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         payload.f0 = float3(0.0, 0.0, 0.0);
         payloadDisableParallax(payload);
         payloadSetPacked(payload, MATERIAL_PARTICLE, 1.0, 0.0, 0.0, 0.0,
-                1.0, 0.0, EMISSION_SOURCE_NONE);
+                1.0, 0.0, EMISSION_SOURCE_NONE, 0u);
         return;
     }
     // Dynamic entities: instances with this custom-index flag bit carry real captured ModelPart
@@ -650,7 +654,7 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         float sss = material == MATERIAL_OPAQUE ? surface.sss : 0.0;
         payloadSetPacked(payload, material, surface.roughness, surface.metalness,
                 emission, sss, header.params.z, header.params.w,
-                materialEmissionSource(header, emission));
+                materialEmissionSource(header, emission), header.extensionOffset);
         if (material == MATERIAL_WATER && entering) {
             payload.flags |= PAYLOAD_WATER_ENTERING;
         }
@@ -744,7 +748,7 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         payloadDisableParallax(payload);
         payloadSetPacked(payload, MATERIAL_GLASS, glassSurface.roughness,
                 glassSurface.metalness, 0.0, 0.0, materialHeader.params.z,
-                materialHeader.params.w, EMISSION_SOURCE_NONE);
+                materialHeader.params.w, EMISSION_SOURCE_NONE, 0u);
         return;
     }
 
@@ -783,7 +787,8 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
     }
     payloadSetPacked(payload, material, surface.roughness, surface.metalness,
             surface.emission, surface.sss, materialHeader.params.z, materialHeader.params.w,
-            materialEmissionSource(materialHeader, surface.emission));
+            materialEmissionSource(materialHeader, surface.emission),
+            materialHeader.extensionOffset);
     if (material == MATERIAL_WATER && entering) {
         payload.flags |= PAYLOAD_WATER_ENTERING;
     }

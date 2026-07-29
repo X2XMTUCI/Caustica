@@ -164,7 +164,7 @@ public struct MaterialHeader {
     public uint model;
     public uint features;        // low feature bits; bits 24..31 = maximum valid material-page LOD
     public uint texturePage;
-    public uint extensionOffset; // zero when no optional extension record is present
+    public uint extensionOffset; // low 24 bits: RGB8 average emissive chromaticity
     public float4 materialUv; // packed-page uvMin.xy + uvExtent.xy
     public float4 albedoUv;   // vanilla atlas uvMin.xy + inverse uvExtent.xy
     public float4 params;  // roughness, metalness, IOR, transmission

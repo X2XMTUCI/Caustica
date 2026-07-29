@@ -1,8 +1,9 @@
 package dev.comfyfluffy.caustica.rt.material;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-
 import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class RtEmissiveSamplingTest {
     private static final RtMaterialDesc.EmissionSummary SUMMARY =
@@ -26,6 +27,49 @@ final class RtEmissiveSamplingTest {
                 material(RtMaterialDesc.EmissionSource.OVERRIDE, 2.0f), 0.0f), 1.0e-6f);
         assertEquals(0.0f, RtEmissiveSampling.estimatedPower(
                 material(RtMaterialDesc.EmissionSource.NONE, 0.0f), 1.0f), 0.0f);
+    }
+
+    @Test
+    void averageEmissionChromaPreservesColourDirection() {
+        RtMaterialDesc.EmissionSummary summary =
+                new RtMaterialDesc.EmissionSummary(0.8f, 0.4f, 0.2f, 0.47f, 0.1f);
+        RtMaterialDesc desc = new RtMaterialDesc(0, RtMaterialDesc.Source.LAB_PBR, 0,
+                0.5f, 0.0f, 1.0f, 0.0f, RtMaterialDesc.EmissionSource.LAB_PBR,
+                1.0f, summary);
+
+        int packed = RtEmissiveSampling.packedAverageChroma(desc);
+        assertEquals(255, packed & 0xff);
+        assertEquals(128, (packed >>> 8) & 0xff);
+        assertEquals(64, (packed >>> 16) & 0xff);
+    }
+
+    @Test
+    void squareRootEncodingRetainsLargeProposalEnergyWithoutHalfOverflow() {
+        for (double weight : new double[]{1.0e-4, 0.01, 1.0, 10_000.0, 1.0e8}) {
+            float encoded = RtEmissiveSampling.encodedTotalWeight(weight);
+            assertTrue(encoded > 0.0f && encoded < 65_504.0f);
+            double decoded = encoded * (double) encoded;
+            assertEquals(weight, decoded, Math.max(1.0e-8, weight * 2.0e-6));
+        }
+        assertEquals(0.0f, RtEmissiveSampling.encodedTotalWeight(0.0));
+        assertEquals(0.0f, RtEmissiveSampling.encodedTotalWeight(Double.NaN));
+    }
+
+    @Test
+    void sparseTextureCoverageCannotCreateInverseCoverageOutlier() {
+        for (float coverage : new float[]{1.0f, 0.1f, 0.01f, 0.001f}) {
+            RtMaterialDesc.EmissionSummary summary =
+                    new RtMaterialDesc.EmissionSummary(coverage, coverage, coverage, coverage, coverage);
+            RtMaterialDesc desc = new RtMaterialDesc(0, RtMaterialDesc.Source.LAB_PBR, 0,
+                    0.5f, 0.0f, 1.0f, 0.0f, RtMaterialDesc.EmissionSource.LAB_PBR,
+                    1.0f, summary);
+            float power = RtEmissiveSampling.estimatedPower(desc, 0.0f);
+            float encoded = RtEmissiveSampling.encodedTotalWeight(power);
+            double sampledContribution = encoded * (double) encoded;
+
+            assertEquals(coverage, sampledContribution, Math.max(1.0e-8, coverage * 2.0e-6));
+            assertTrue(sampledContribution <= 1.0);
+        }
     }
 
     private static RtMaterialDesc material(RtMaterialDesc.EmissionSource source, float strength) {
