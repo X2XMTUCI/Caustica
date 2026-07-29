@@ -5,8 +5,8 @@
 Install both files:
 
 - `caustica-0.1.0-voxy-compat.jar`
-  - Size: 40,084,118 bytes
-  - SHA-256: `5565EE48975DA1CF7BC851136366870750025E10EF1A06FEC7BF8A0C5711FF97`
+  - Size: 40,129,340 bytes
+  - SHA-256: `3957376CE8C0709D6483271E12CAE7D58F4E2CABDAD59FB99740D128E111420E`
 - `voxy-0.2.18-beta-caustica.11-mc26.2.jar`
   - Size: 38,810,490 bytes
   - SHA-256: `1FC472DA6C3986D74E68EBF794B2D234BDF9CD9FD41E0E13BB4E860FF1EF516B`
@@ -14,6 +14,11 @@ Install both files:
 This Voxy edition is a CPU-side world/LOD provider for Caustica. It does not require Sodium and
 does not start Voxy's standalone raster renderer. Caustica progressively converts Voxy LOD meshes
 to BLAS/TLAS geometry so distant terrain participates in path-traced visibility, lighting and shadows.
+The Caustica build includes ReSTIR DI for the analytic sun/moon area light. It evaluates 1-8 fresh
+candidates, reuses validated temporal reservoirs and optionally four spatial neighbours, then traces
+only the selected visibility ray. Video Settings expose the ReSTIR toggle, candidate count and
+spatial-reuse toggle. Reservoir history is ping-ponged at render resolution and is invalidated on
+world, resource-pack, resolution and enable-state changes.
 The `.11` build adds live Voxy controls to Caustica's Video Settings screen: enable/disable,
 new-chunk ingestion, a stepped 32-512 chunk LOD distance, and a bounded rebuild button. Changes
 are saved to Voxy's own config and rebuild the desired LOD set without re-entering the world.
