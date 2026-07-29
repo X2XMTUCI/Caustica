@@ -487,7 +487,7 @@ struct EmissiveTriangle {
 
 struct RestirSample {
     // measure < 0: value is a celestial direction. measure > 0: value is an emitter point and measure
-    // is triangleArea * triangleCount, the inverse of the conditional uniform triangle/area proposal.
+    // is the reciprocal PDF of the CPU-built area-and-emissive-power triangle/point proposal.
     float3 value;
     float measure;
 };
@@ -631,8 +631,11 @@ float restirPHat(RestirSample sample, float3 hitPos, float3 n, float3 v,
     }
     // A texture-independent scalar target keeps temporal samples valid without storing material/list
     // indices. Exact emitted RGB, mask, orientation and occlusion are evaluated by the one selected ray.
-    return max(luminance(response) * EMISSIVE_STRENGTH * sample.measure
-            / max(distance * distance, 0.0625), 0.0);
+    // CPU sampling is proportional to triangle area * average emitted power. Dividing the physical
+    // integrand by that proposal cancels average power and the distribution's common normalization,
+    // so response / distance^2 is the stable texture-independent RIS target. The exact target below
+    // still multiplies by the stored reciprocal PDF and traced texel emission.
+    return max(luminance(response) / max(distance * distance, 0.0625), 0.0);
 }
 
 uint64_t restirLightAddress() {
@@ -648,7 +651,19 @@ RestirSample restirFreshLocal(inout uint seed) {
     if (count == 0u || address == 0u) {
         return sample;
     }
-    uint index = min(uint(rndf(seed) * float(count)), count - 1u);
+    float cdfTarget = rndf(seed);
+    uint lo = 0u;
+    uint hi = count - 1u;
+    [loop]
+    while (lo < hi) {
+        uint mid = lo + ((hi - lo) >> 1u);
+        if (ConstPtr<EmissiveTriangle>(address)[mid].p0.w < cdfTarget) {
+            lo = mid + 1u;
+        } else {
+            hi = mid;
+        }
+    }
+    uint index = lo;
     EmissiveTriangle triangle = ConstPtr<EmissiveTriangle>(address)[index];
     float3 p0 = triangle.p0.xyz;
     float3 p1 = triangle.p1.xyz;
@@ -663,7 +678,7 @@ RestirSample restirFreshLocal(inout uint seed) {
     float b1 = su * (1.0 - v);
     float b2 = su * v;
     sample.value = b0 * p0 + b1 * p1 + b2 * p2;
-    sample.measure = min(area * float(count), 65500.0);
+    sample.measure = triangle.p1.w;
     return sample;
 }
 

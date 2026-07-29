@@ -38,6 +38,7 @@ import dev.comfyfluffy.caustica.rt.RtFrameStats;
 import dev.comfyfluffy.caustica.rt.accel.RtAccel;
 import dev.comfyfluffy.caustica.rt.accel.RtBuffer;
 import dev.comfyfluffy.caustica.rt.material.RtMaterialDesc;
+import dev.comfyfluffy.caustica.rt.material.RtEmissiveSampling;
 import dev.comfyfluffy.caustica.rt.material.RtMaterialRegistry;
 import dev.comfyfluffy.caustica.rt.pipeline.RtPipeline;
 
@@ -361,7 +362,8 @@ public final class RtEntities {
     public int writeEmissiveTriangles(ByteBuffer dst, int firstEntry, int maxEntries) {
         int count = firstEntry;
         float[] triangles = emissiveTriangles.elements();
-        for (int base = 0; base + 8 < emissiveTriangles.size() && count < maxEntries; base += 9) {
+        for (int base = 0; base + RtEmissiveSampling.POWER_OFFSET < emissiveTriangles.size()
+                && count < maxEntries; base += RtEmissiveSampling.FLOATS_PER_TRIANGLE) {
             int out = count * 48;
             for (int corner = 0; corner < 3; corner++) {
                 int source = base + corner * 3;
@@ -369,7 +371,8 @@ public final class RtEntities {
                 dst.putFloat(target, triangles[source]);
                 dst.putFloat(target + 4, triangles[source + 1]);
                 dst.putFloat(target + 8, triangles[source + 2]);
-                dst.putFloat(target + 12, 0.0f);
+                dst.putFloat(target + 12,
+                        corner == 2 ? triangles[base + RtEmissiveSampling.POWER_OFFSET] : 0.0f);
             }
             count++;
         }
@@ -1486,8 +1489,9 @@ public final class RtEntities {
                 continue;
             }
             RtMaterialDesc desc = materials.material(materialId);
+            float estimatedPower = RtEmissiveSampling.estimatedPower(desc, fallbackEmission);
             if (desc.model() != RtMaterialRegistry.MODEL_OPAQUE
-                    || (fallbackEmission <= 0.0f && !desc.emissionSummary().emissive())) {
+                    || !(estimatedPower > 0.0f)) {
                 continue;
             }
             for (int corner = 0; corner < 3; corner++) {
@@ -1499,6 +1503,7 @@ public final class RtEntities {
                 destination.add(transform[4] * x + transform[5] * y + transform[6] * z + transform[7]);
                 destination.add(transform[8] * x + transform[9] * y + transform[10] * z + transform[11]);
             }
+            destination.add(estimatedPower);
         }
     }
 
@@ -1506,7 +1511,8 @@ public final class RtEntities {
         if (triangles == null) {
             return;
         }
-        for (int base = 0; base + 8 < triangles.length; base += 9) {
+        for (int base = 0; base + RtEmissiveSampling.POWER_OFFSET < triangles.length;
+             base += RtEmissiveSampling.FLOATS_PER_TRIANGLE) {
             for (int corner = 0; corner < 3; corner++) {
                 int source = base + corner * 3;
                 float x = triangles[source];
@@ -1516,6 +1522,7 @@ public final class RtEntities {
                 emissiveTriangles.add(transform[4] * x + transform[5] * y + transform[6] * z + transform[7]);
                 emissiveTriangles.add(transform[8] * x + transform[9] * y + transform[10] * z + transform[11]);
             }
+            emissiveTriangles.add(triangles[base + RtEmissiveSampling.POWER_OFFSET]);
         }
     }
 

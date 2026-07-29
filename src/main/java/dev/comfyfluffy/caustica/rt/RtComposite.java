@@ -871,13 +871,58 @@ public final class RtComposite {
         }
         int total = RtEntities.INSTANCE.writeEmissiveTriangles(
                 dst, staticEmissiveLightCount, MAX_EMISSIVE_LIGHT_TRIANGLES);
-        long flushOffset = rebuildStatic ? 0L : (long) staticEmissiveLightCount * EMISSIVE_LIGHT_ENTRY_BYTES;
+        finalizeEmissiveDistribution(dst, total);
+        // CDF/measure metadata spans both the static prefix and dynamic suffix and is recomputed after
+        // moving emitters append, so flush the complete live distribution rather than only the suffix.
+        long flushOffset = 0L;
         long flushEnd = (long) total * EMISSIVE_LIGHT_ENTRY_BYTES;
         if (flushEnd > flushOffset) {
             emissiveLightBuffer.flush(flushOffset, flushEnd - flushOffset);
         }
         RtFrameStats.FRAME.count("restirEmissiveTriangles", total);
         return total;
+    }
+
+    /**
+     * Build an area-and-power-weighted lower-bound CDF in p0.w and the reciprocal point PDF in p1.w.
+     * p2.w is the CPU material compiler's average emitted-luminance estimate. The estimate affects only
+     * proposal efficiency: the raygen endpoint trace still evaluates the exact authored texel.
+     */
+    private static void finalizeEmissiveDistribution(ByteBuffer dst, int count) {
+        double totalWeight = 0.0;
+        for (int entry = 0; entry < count; entry++) {
+            int base = entry * EMISSIVE_LIGHT_ENTRY_BYTES;
+            double ax = dst.getFloat(base + 16) - dst.getFloat(base);
+            double ay = dst.getFloat(base + 20) - dst.getFloat(base + 4);
+            double az = dst.getFloat(base + 24) - dst.getFloat(base + 8);
+            double bx = dst.getFloat(base + 32) - dst.getFloat(base);
+            double by = dst.getFloat(base + 36) - dst.getFloat(base + 4);
+            double bz = dst.getFloat(base + 40) - dst.getFloat(base + 8);
+            double cx = ay * bz - az * by;
+            double cy = az * bx - ax * bz;
+            double cz = ax * by - ay * bx;
+            double area = 0.5 * Math.sqrt(cx * cx + cy * cy + cz * cz);
+            float power = dst.getFloat(base + 44);
+            double weight = area * power;
+            if (!(weight > 0.0) || !Double.isFinite(weight)) {
+                weight = 0.0;
+            }
+            totalWeight += weight;
+            dst.putFloat(base + 12, (float) totalWeight);
+        }
+        if (!(totalWeight > 0.0) || !Double.isFinite(totalWeight)) {
+            return;
+        }
+        for (int entry = 0; entry < count; entry++) {
+            int base = entry * EMISSIVE_LIGHT_ENTRY_BYTES;
+            float power = dst.getFloat(base + 44);
+            float cdf = entry + 1 == count ? 1.0f
+                    : (float) Math.min(1.0, dst.getFloat(base + 12) / totalWeight);
+            float inversePdf = power > 0.0f
+                    ? (float) Math.min(65_500.0, totalWeight / power) : 0.0f;
+            dst.putFloat(base + 12, cdf);
+            dst.putFloat(base + 28, inversePdf);
+        }
     }
 
     private void recordFrame(RtContext ctx, RtPipeline active, GpuTexture nativeColor) {

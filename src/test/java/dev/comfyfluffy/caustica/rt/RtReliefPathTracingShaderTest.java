@@ -160,11 +160,14 @@ final class RtReliefPathTracingShaderTest {
         assertTrue(composite.contains("STATIC_EMISSIVE_LIGHT_TRIANGLE_LIMIT = 60_000"));
         assertTrue(composite.contains("DISTANT_EMISSIVE_LIGHT_TRIANGLE_BUDGET = 512"));
         assertTrue(composite.contains("LOCAL_EMISSIVE_LIGHT_RADIUS = 64.0f"));
+        assertTrue(composite.contains("finalizeEmissiveDistribution(dst, total)"));
+        assertTrue(raygen.contains("[mid].p0.w < cdfTarget"));
+        assertTrue(raygen.contains("sample.measure = triangle.p1.w"));
         assertTrue(composite.contains("(int) emissiveLightAddress"));
         assertTrue(composite.contains("emissiveLightCount"));
         assertTrue(terrainMesher.contains("extractEmissiveTriangles"));
-        assertTrue(terrainMesher.contains(
-                "fallbackEmission <= 0.0f && !desc.emissionSummary().emissive()"));
+        assertTrue(terrainMesher.contains("RtEmissiveSampling.estimatedPower"));
+        assertTrue(terrainMesher.contains("!(estimatedPower > 0.0f)"));
         assertFalse(terrainMesher.contains(
                 "desc.emissionSource() == RtMaterialDesc.EmissionSource.NONE"));
         assertTrue(entities.contains("snapshotEmissiveCapture"));

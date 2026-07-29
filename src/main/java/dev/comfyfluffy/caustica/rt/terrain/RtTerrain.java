@@ -15,6 +15,7 @@ import dev.comfyfluffy.caustica.rt.RtGpuExecutor;
 import dev.comfyfluffy.caustica.rt.accel.RtAccel;
 import dev.comfyfluffy.caustica.rt.accel.RtBuffer;
 import dev.comfyfluffy.caustica.rt.material.RtMaterialRegistry;
+import dev.comfyfluffy.caustica.rt.material.RtEmissiveSampling;
 import it.unimi.dsi.fastutil.floats.FloatArrayList;
 import it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap;
 import it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap;
@@ -275,7 +276,8 @@ public final class RtTerrain {
                 continue;
             }
             float[] triangles = geom.emissiveTriangles;
-            for (int base = 0; base + 8 < triangles.length && count < maxEntries; base += 9) {
+            for (int base = 0; base + RtEmissiveSampling.POWER_OFFSET < triangles.length
+                    && count < maxEntries; base += RtEmissiveSampling.FLOATS_PER_TRIANGLE) {
                 int out = count * 48;
                 for (int corner = 0; corner < 3; corner++) {
                     int source = base + corner * 3;
@@ -283,7 +285,8 @@ public final class RtTerrain {
                     dst.putFloat(target, triangles[source] + tx);
                     dst.putFloat(target + 4, triangles[source + 1] + ty);
                     dst.putFloat(target + 8, triangles[source + 2] + tz);
-                    dst.putFloat(target + 12, 0.0f);
+                    dst.putFloat(target + 12, corner == 2
+                            ? triangles[base + RtEmissiveSampling.POWER_OFFSET] : 0.0f);
                 }
                 count++;
             }

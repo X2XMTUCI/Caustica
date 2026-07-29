@@ -8,6 +8,7 @@ import dev.comfyfluffy.caustica.rt.accel.RtAccel;
 import dev.comfyfluffy.caustica.rt.accel.RtBuffer;
 import dev.comfyfluffy.caustica.rt.material.RtMaterialRegistry;
 import dev.comfyfluffy.caustica.rt.material.RtMaterials;
+import dev.comfyfluffy.caustica.rt.material.RtEmissiveSampling;
 import dev.comfyfluffy.caustica.rt.terrain.RtSectionBuilder.PreparedSection;
 import dev.comfyfluffy.caustica.rt.terrain.RtTerrainMesher.PackedSection;
 import net.minecraft.client.Minecraft;
@@ -285,7 +286,8 @@ public final class RtDistantHorizonsTerrain {
             float tx = geom.sx - rebaseX;
             float ty = geom.sy - rebaseY;
             float tz = geom.sz - rebaseZ;
-            for (int base = 0; base + 8 < triangles.length && count < maxEntries; base += 9) {
+            for (int base = 0; base + RtEmissiveSampling.POWER_OFFSET < triangles.length
+                    && count < maxEntries; base += RtEmissiveSampling.FLOATS_PER_TRIANGLE) {
                 float cx = tx + (triangles[base] + triangles[base + 3] + triangles[base + 6]) / 3.0f;
                 float cy = ty + (triangles[base + 1] + triangles[base + 4] + triangles[base + 7]) / 3.0f;
                 float cz = tz + (triangles[base + 2] + triangles[base + 5] + triangles[base + 8]) / 3.0f;
@@ -299,7 +301,8 @@ public final class RtDistantHorizonsTerrain {
                     dst.putFloat(target, triangles[source] + tx);
                     dst.putFloat(target + 4, triangles[source + 1] + ty);
                     dst.putFloat(target + 8, triangles[source + 2] + tz);
-                    dst.putFloat(target + 12, 0.0f);
+                    dst.putFloat(target + 12, corner == 2
+                            ? triangles[base + RtEmissiveSampling.POWER_OFFSET] : 0.0f);
                 }
                 count++;
             }

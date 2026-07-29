@@ -14,6 +14,7 @@ import dev.comfyfluffy.caustica.rt.material.RtBlockMaterials;
 import dev.comfyfluffy.caustica.rt.material.RtMaterials;
 import dev.comfyfluffy.caustica.rt.material.RtMaterialRegistry;
 import dev.comfyfluffy.caustica.rt.material.RtMaterialDesc;
+import dev.comfyfluffy.caustica.rt.material.RtEmissiveSampling;
 import it.unimi.dsi.fastutil.floats.FloatArrayList;
 import it.unimi.dsi.fastutil.ints.IntArrayList;
 import it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap;
@@ -190,8 +191,9 @@ final class RtTerrainMesher {
                 continue;
             }
             RtMaterialDesc desc = materials.material(materialId);
+            float estimatedPower = RtEmissiveSampling.estimatedPower(desc, fallbackEmission);
             if (desc.model() != RtMaterialRegistry.MODEL_OPAQUE
-                    || (fallbackEmission <= 0.0f && !desc.emissionSummary().emissive())) {
+                    || !(estimatedPower > 0.0f)) {
                 continue;
             }
             for (int corner = 0; corner < 3; corner++) {
@@ -200,6 +202,7 @@ final class RtTerrainMesher {
                 lights.add(positions[vertex + 1]);
                 lights.add(positions[vertex + 2]);
             }
+            lights.add(estimatedPower);
         }
         return lights.toFloatArray();
     }
