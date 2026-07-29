@@ -5,8 +5,8 @@
 Install both files:
 
 - `caustica-0.1.0-voxy-compat.jar`
-  - Size: 40,202,369 bytes
-  - SHA-256: `ACCA05B7C30A02B4593DC4AA80D1333612B052E8663CCCA9610C80ADB0B86670`
+  - Size: 40,206,677 bytes
+  - SHA-256: `F5CEE09D98660810E896C84848928FB06E790F577D999C29690ECEFC2B6BBF38`
 - `voxy-0.2.18-beta-caustica.11-mc26.2.jar`
   - Size: 38,810,490 bytes
   - SHA-256: `1FC472DA6C3986D74E68EBF794B2D234BDF9CD9FD41E0E13BB4E860FF1EF516B`
@@ -30,7 +30,11 @@ History is invalidated on geometry publication/rebase, world, resource-pack, res
 enable-state changes. Local-emitter proposals are restricted to the nearby 64-block light domain,
 with a separate 512-triangle budget for Voxy/Distant Horizons proxies; the same near-distance
 clamp is used for reservoir selection and final evaluation. This prevents distant LOD emitters
-from creating rare over-weighted torch samples, large white/orange patches and structured stripes.
+from creating rare over-weighted torch samples. Within that domain, triangle selection uses a
+CPU-built CDF weighted by actual triangle area and the compiled material's average emitted power.
+The final endpoint remains fully ray traced, but tiny bright torch quads and sparse emission masks
+no longer produce rare, enormous samples that Ray Reconstruction spreads into white/orange patches
+and structured stripes.
 The `.11` build adds live Voxy controls to Caustica's Video Settings screen: enable/disable,
 new-chunk ingestion, a stepped 32-512 chunk LOD distance, and a bounded rebuild button. Changes
 are saved to Voxy's own config and rebuild the desired LOD set without re-entering the world.
