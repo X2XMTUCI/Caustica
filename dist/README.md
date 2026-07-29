@@ -5,8 +5,8 @@
 Install both files:
 
 - `caustica-0.1.0-voxy-compat.jar`
-  - Size: 40,206,677 bytes
-  - SHA-256: `F5CEE09D98660810E896C84848928FB06E790F577D999C29690ECEFC2B6BBF38`
+  - Size: 40,215,631 bytes
+  - SHA-256: `5695DC8E34E1CB9B4927F8E0341AC677AE5A184FF61A732EBF42F6273431CB6E`
 - `voxy-0.2.18-beta-caustica.11-mc26.2.jar`
   - Size: 38,810,490 bytes
   - SHA-256: `1FC472DA6C3986D74E68EBF794B2D234BDF9CD9FD41E0E13BB4E860FF1EF516B`
@@ -34,7 +34,10 @@ from creating rare over-weighted torch samples. Within that domain, triangle sel
 CPU-built CDF weighted by actual triangle area and the compiled material's average emitted power.
 The final endpoint remains fully ray traced, but tiny bright torch quads and sparse emission masks
 no longer produce rare, enormous samples that Ray Reconstruction spreads into white/orange patches
-and structured stripes.
+and structured stripes. Each selected triangle now also carries its original corner UVs and material
+ID. Raygen performs an eight-candidate RIS pass over the actual LabPBR/heuristic/override emission
+mask before tracing one endpoint, retaining exact path-traced visibility while remaining stable even
+with the user-facing ReSTIR candidate count set to one.
 The `.11` build adds live Voxy controls to Caustica's Video Settings screen: enable/disable,
 new-chunk ingestion, a stepped 32-512 chunk LOD distance, and a bounded rebuild button. Changes
 are saved to Voxy's own config and rebuild the desired LOD set without re-entering the world.
