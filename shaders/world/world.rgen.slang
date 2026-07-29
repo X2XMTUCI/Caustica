@@ -42,7 +42,9 @@ import world_common;
 [[vk::binding(12, 0)]] [format("rgba16f")] RWTexture2D<float4> restirB1;
 // Shared canonical LabPBR height pages. Raygen samples these for visibility along the actual direction
 // selected by each path vertex, so emissive and indirect paths receive the same relief masking as NEE.
+[[vk::binding(1, 1)]] Sampler2D materialSurface0Tex[];
 [[vk::binding(2, 1)]] Sampler2D materialNormalAoTex[];
+[[vk::binding(3, 1)]] Sampler2D materialSurface1Tex[];
 
 // Per-frame push data loaded once from the BDA buffer at the top of main() (same pattern as the GLSL
 // `worldPush` global). Layout constants generated from this module's SPIR-V — see world_common.WorldPush.
@@ -483,6 +485,8 @@ struct EmissiveTriangle {
     float4 p0;
     float4 p1;
     float4 p2;
+    float4 uv01;    // uv0.xy, uv1.xy
+    float4 uv2Meta; // uv2.xy, asfloat(materialId), primitive fallback emission
 };
 
 struct RestirSample {
@@ -642,6 +646,33 @@ uint64_t restirLightAddress() {
     return uint64_t(worldPush.breakingPad0) | (uint64_t(worldPush.breakingPad1) << 32);
 }
 
+float restirEmissionProxy(EmissiveTriangle triangle, float3 bary) {
+    float2 atlasUv = bary.x * triangle.uv01.xy
+            + bary.y * triangle.uv01.zw + bary.z * triangle.uv2Meta.xy;
+    uint materialId = asuint(triangle.uv2Meta.z);
+    MaterialHeader header = ConstPtr<MaterialHeader>(pc.materialTableAddr)[materialId];
+    float2 localUv = clamp((atlasUv - header.albedoUv.xy) * header.albedoUv.zw,
+            float2(0.0, 0.0), float2(1.0, 1.0));
+    float2 pageUv = header.materialUv.xy + localUv * header.materialUv.zw;
+    uint page = header.texturePage;
+    float fallbackEmission = max(0.0, triangle.uv2Meta.w);
+    float emission = fallbackEmission;
+    if ((header.features & (MATERIAL_FEATURE_SPEC | MATERIAL_FEATURE_HEURISTIC_EMISSION)) != 0u) {
+        float4 surface0 = materialSurface0Tex[NonUniformResourceIndex(page)].SampleLevel(pageUv, 0.0);
+        emission = (header.features & MATERIAL_FEATURE_SPEC) != 0u
+                ? surface0.b : surface0.b * fallbackEmission;
+    }
+    if ((header.features & MATERIAL_FEATURE_OVERRIDE_EMISSION) != 0u) {
+        float4 surface1 = materialSurface1Tex[NonUniformResourceIndex(page)].SampleLevel(pageUv, 0.0);
+        float strength = float((header.features >> MATERIAL_EMISSION_STRENGTH_SHIFT)
+                & MATERIAL_EMISSION_STRENGTH_MASK)
+                * (MATERIAL_MAX_OVERRIDE_EMISSION_STRENGTH / float(MATERIAL_EMISSION_STRENGTH_MASK));
+        emission = surface1.a * strength;
+    }
+    // Keep complete support for POM-displaced texels whose exact endpoint UV can differ slightly.
+    return max(emission, 1.0e-5);
+}
+
 RestirSample restirFreshLocal(inout uint seed) {
     RestirSample sample;
     sample.value = float3(0.0, 0.0, 0.0);
@@ -672,13 +703,29 @@ RestirSample restirFreshLocal(inout uint seed) {
     if (!(area > 1.0e-8)) {
         return sample;
     }
-    float su = sqrt(rndf(seed));
-    float v = rndf(seed);
-    float b0 = 1.0 - su;
-    float b1 = su * (1.0 - v);
-    float b2 = su * v;
-    sample.value = b0 * p0 + b1 * p1 + b2 * p2;
-    sample.measure = triangle.p1.w;
+    static const int TEXEL_CANDIDATES = 8;
+    float proxySum = 0.0;
+    float selectedProxy = 0.0;
+    float3 selectedPoint = p0;
+    [unroll]
+    for (int attempt = 0; attempt < TEXEL_CANDIDATES; ++attempt) {
+        float su = sqrt(rndf(seed));
+        float v = rndf(seed);
+        float3 bary = float3(1.0 - su, su * (1.0 - v), su * v);
+        float proxy = restirEmissionProxy(triangle, bary);
+        float nextSum = proxySum + proxy;
+        if (rndf(seed) * nextSum < proxy) {
+            selectedPoint = bary.x * p0 + bary.y * p1 + bary.z * p2;
+            selectedProxy = proxy;
+        }
+        proxySum = nextSum;
+    }
+    if (!(selectedProxy > 0.0 && proxySum > 0.0)) {
+        return sample;
+    }
+    sample.value = selectedPoint;
+    float innerNormalization = proxySum / (float(TEXEL_CANDIDATES) * selectedProxy);
+    sample.measure = min(triangle.p1.w * innerNormalization, 65500.0);
     return sample;
 }
 

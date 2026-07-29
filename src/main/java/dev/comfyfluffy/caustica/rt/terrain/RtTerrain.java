@@ -278,7 +278,7 @@ public final class RtTerrain {
             float[] triangles = geom.emissiveTriangles;
             for (int base = 0; base + RtEmissiveSampling.POWER_OFFSET < triangles.length
                     && count < maxEntries; base += RtEmissiveSampling.FLOATS_PER_TRIANGLE) {
-                int out = count * 48;
+                int out = count * RtEmissiveSampling.GPU_ENTRY_BYTES;
                 for (int corner = 0; corner < 3; corner++) {
                     int source = base + corner * 3;
                     int target = out + corner * 16;
@@ -288,10 +288,21 @@ public final class RtTerrain {
                     dst.putFloat(target + 12, corner == 2
                             ? triangles[base + RtEmissiveSampling.POWER_OFFSET] : 0.0f);
                 }
+                writeEmissiveMetadata(dst, out, triangles, base);
                 count++;
             }
         }
         return count;
+    }
+
+    static void writeEmissiveMetadata(ByteBuffer dst, int out, float[] triangles, int base) {
+        for (int uv = 0; uv < 6; uv++) {
+            dst.putFloat(out + 48 + uv * 4,
+                    triangles[base + RtEmissiveSampling.UV_OFFSET + uv]);
+        }
+        dst.putInt(out + 72, Float.floatToRawIntBits(
+                triangles[base + RtEmissiveSampling.MATERIAL_OFFSET]));
+        dst.putFloat(out + 76, triangles[base + RtEmissiveSampling.FALLBACK_OFFSET]);
     }
 
     private static float axisDistanceToSection(float sectionOrigin) {

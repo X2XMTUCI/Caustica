@@ -294,7 +294,7 @@ public final class RtDistantHorizonsTerrain {
                 if (cx * cx + cy * cy + cz * cz > maxDistance2) {
                     continue;
                 }
-                int out = count * 48;
+                int out = count * RtEmissiveSampling.GPU_ENTRY_BYTES;
                 for (int corner = 0; corner < 3; corner++) {
                     int source = base + corner * 3;
                     int target = out + corner * 16;
@@ -304,6 +304,7 @@ public final class RtDistantHorizonsTerrain {
                     dst.putFloat(target + 12, corner == 2
                             ? triangles[base + RtEmissiveSampling.POWER_OFFSET] : 0.0f);
                 }
+                RtTerrain.writeEmissiveMetadata(dst, out, triangles, base);
                 count++;
             }
             if (count >= maxEntries) {
@@ -592,7 +593,7 @@ public final class RtDistantHorizonsTerrain {
                 new int[]{0, anyHitTris, 0, waterTris},
                 new int[]{0, 0, anyHitTris, anyHitTris},
                 RtTerrainMesher.extractEmissiveTriangles(
-                        packed.positions, packed.indices, packed.prims, materials));
+                        packed.positions, packed.indices, packed.uvs, packed.prims, materials));
     }
 
     private static QuadCounts countDhQuads(byte[] bytes, boolean transparentPass, int maxLocal) {

@@ -167,7 +167,7 @@ final class RtTerrainMesher {
             triAcc += bucketTris[b];
         }
         return new PackedSection(positions, indices, uvs, material, bucketTris, triBase,
-                extractEmissiveTriangles(positions, indices, material, materials));
+                extractEmissiveTriangles(positions, indices, uvs, material, materials));
     }
 
     /**
@@ -178,8 +178,8 @@ final class RtTerrainMesher {
      * the normal closest-hit material path, so LabPBR/override/heuristic texture masks and tint are
      * evaluated at the exact sampled texel instead of approximating an entire block as uniformly bright.</p>
      */
-    static float[] extractEmissiveTriangles(float[] positions, int[] indices, float[] material,
-                                            RtMaterialRegistry.Snapshot materials) {
+    static float[] extractEmissiveTriangles(float[] positions, int[] indices, float[] uvs, float[] material,
+                                             RtMaterialRegistry.Snapshot materials) {
         FloatArrayList lights = new FloatArrayList();
         int triangleCount = indices.length / 3;
         for (int tri = 0; tri < triangleCount; tri++) {
@@ -203,6 +203,12 @@ final class RtTerrainMesher {
                 lights.add(positions[vertex + 2]);
             }
             lights.add(estimatedPower);
+            int uvBase = tri * 6;
+            for (int uv = 0; uv < 6; uv++) {
+                lights.add(uvs[uvBase + uv]);
+            }
+            lights.add(Float.intBitsToFloat(materialId));
+            lights.add(fallbackEmission);
         }
         return lights.toFloatArray();
     }

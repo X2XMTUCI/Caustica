@@ -364,7 +364,7 @@ public final class RtEntities {
         float[] triangles = emissiveTriangles.elements();
         for (int base = 0; base + RtEmissiveSampling.POWER_OFFSET < emissiveTriangles.size()
                 && count < maxEntries; base += RtEmissiveSampling.FLOATS_PER_TRIANGLE) {
-            int out = count * 48;
+            int out = count * RtEmissiveSampling.GPU_ENTRY_BYTES;
             for (int corner = 0; corner < 3; corner++) {
                 int source = base + corner * 3;
                 int target = out + corner * 16;
@@ -374,6 +374,13 @@ public final class RtEntities {
                 dst.putFloat(target + 12,
                         corner == 2 ? triangles[base + RtEmissiveSampling.POWER_OFFSET] : 0.0f);
             }
+            for (int uv = 0; uv < 6; uv++) {
+                dst.putFloat(out + 48 + uv * 4,
+                        triangles[base + RtEmissiveSampling.UV_OFFSET + uv]);
+            }
+            dst.putInt(out + 72, Float.floatToRawIntBits(
+                    triangles[base + RtEmissiveSampling.MATERIAL_OFFSET]));
+            dst.putFloat(out + 76, triangles[base + RtEmissiveSampling.FALLBACK_OFFSET]);
             count++;
         }
         return count;
@@ -1479,6 +1486,7 @@ public final class RtEntities {
         int triangleCount = capture.idx.size() / 3;
         int[] indices = capture.idx.elements();
         float[] vertices = capture.verts.elements();
+        float[] uvs = capture.uvList.elements();
         float[] primitives = capture.prim.elements();
         RtMaterialRegistry.Snapshot materials = RtMaterialRegistry.INSTANCE.requireSnapshot();
         for (int tri = 0; tri < triangleCount; tri++) {
@@ -1504,6 +1512,13 @@ public final class RtEntities {
                 destination.add(transform[8] * x + transform[9] * y + transform[10] * z + transform[11]);
             }
             destination.add(estimatedPower);
+            for (int corner = 0; corner < 3; corner++) {
+                int uv = indices[tri * 3 + corner] * 2;
+                destination.add(uvs[uv]);
+                destination.add(uvs[uv + 1]);
+            }
+            destination.add(Float.intBitsToFloat(materialId));
+            destination.add(fallbackEmission);
         }
     }
 
@@ -1522,7 +1537,10 @@ public final class RtEntities {
                 emissiveTriangles.add(transform[4] * x + transform[5] * y + transform[6] * z + transform[7]);
                 emissiveTriangles.add(transform[8] * x + transform[9] * y + transform[10] * z + transform[11]);
             }
-            emissiveTriangles.add(triangles[base + RtEmissiveSampling.POWER_OFFSET]);
+            for (int metadata = RtEmissiveSampling.POWER_OFFSET;
+                 metadata < RtEmissiveSampling.FLOATS_PER_TRIANGLE; metadata++) {
+                emissiveTriangles.add(triangles[base + metadata]);
+            }
         }
     }
 

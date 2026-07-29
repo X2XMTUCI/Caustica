@@ -55,6 +55,7 @@ import dev.comfyfluffy.caustica.rt.material.RtBlockMaterials;
 import dev.comfyfluffy.caustica.rt.material.RtEmissionSemantics;
 import dev.comfyfluffy.caustica.rt.material.RtMaterialOverrides;
 import dev.comfyfluffy.caustica.rt.material.RtMaterialRegistry;
+import dev.comfyfluffy.caustica.rt.material.RtEmissiveSampling;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDisplayPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDlssRr;
@@ -101,7 +102,7 @@ public final class RtComposite {
     // Hot addresses/frameIndex and raygen's debugView avoid unnecessary global-memory dereferences;
     // WorldPushConstantsData is generated from the same Slang module and owns this second ABI as well.
     private static final int GUIDE_COUNT = 10; // six RR guides + four ReSTIR reservoir images, bindings 3..12
-    private static final int EMISSIVE_LIGHT_ENTRY_BYTES = 48; // three float4 vertices
+    private static final int EMISSIVE_LIGHT_ENTRY_BYTES = RtEmissiveSampling.GPU_ENTRY_BYTES;
     private static final int MAX_EMISSIVE_LIGHT_TRIANGLES = 65_536;
     // Keep capacity for moving entities and block entities even in an emissive-heavy resident terrain
     // set. Static real + distant geometry uses the rest of the stable BDA array.

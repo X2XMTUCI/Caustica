@@ -102,12 +102,13 @@ final class RtReliefPathTracingShaderTest {
     }
 
     @Test
-    void normalHeightPagesAreVisibleToRaygen() throws IOException {
+    void materialPagesNeededByRaygenAreVisibleToThatStage() throws IOException {
         String pipeline = Files.readString(Path.of("src", "main", "java", "dev", "comfyfluffy",
                 "caustica", "rt", "pipeline", "RtPipeline.java"));
 
-        assertTrue(pipeline.contains(
-                "if (b == MATERIAL_NORMAL_AO_BINDING) stages |= VK_SHADER_STAGE_RAYGEN_BIT_KHR;"));
+        assertTrue(pipeline.contains("b == MATERIAL_SURFACE0_BINDING"));
+        assertTrue(pipeline.contains("b == MATERIAL_NORMAL_AO_BINDING"));
+        assertTrue(pipeline.contains("b == MATERIAL_SURFACE1_BINDING"));
     }
 
     @Test
@@ -162,7 +163,9 @@ final class RtReliefPathTracingShaderTest {
         assertTrue(composite.contains("LOCAL_EMISSIVE_LIGHT_RADIUS = 64.0f"));
         assertTrue(composite.contains("finalizeEmissiveDistribution(dst, total)"));
         assertTrue(raygen.contains("[mid].p0.w < cdfTarget"));
-        assertTrue(raygen.contains("sample.measure = triangle.p1.w"));
+        assertTrue(raygen.contains("restirEmissionProxy"));
+        assertTrue(raygen.contains("static const int TEXEL_CANDIDATES = 8"));
+        assertTrue(raygen.contains("triangle.p1.w * innerNormalization"));
         assertTrue(composite.contains("(int) emissiveLightAddress"));
         assertTrue(composite.contains("emissiveLightCount"));
         assertTrue(terrainMesher.contains("extractEmissiveTriangles"));

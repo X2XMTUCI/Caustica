@@ -210,9 +210,12 @@ public final class RtPipeline {
                 java.nio.IntBuffer bindFlags = stack.mallocInt(nb);
                 for (int b = 0; b < nb; b++) {
                     int stages = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-                    // Raygen evaluates height-field visibility for every sampled path direction, so it
-                    // reads the canonical normal/height pages after closest-hit exports compact UV/TBN state.
-                    if (b == MATERIAL_NORMAL_AO_BINDING) stages |= VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+                    // Raygen evaluates height-field visibility and importance-samples authored emission
+                    // masks, so all three canonical material-page arrays are visible to that stage.
+                    if (b == MATERIAL_SURFACE0_BINDING || b == MATERIAL_NORMAL_AO_BINDING
+                            || b == MATERIAL_SURFACE1_BINDING) {
+                        stages |= VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+                    }
                     if (b == ENTITY_ALBEDO_BINDING && hasAhit) stages |= VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
                     bl.get(b).binding(b).descriptorType(VK10.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
                             .descriptorCount(bindlessTextures).stageFlags(stages);

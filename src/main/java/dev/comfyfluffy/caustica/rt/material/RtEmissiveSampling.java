@@ -3,14 +3,19 @@ package dev.comfyfluffy.caustica.rt.material;
 /**
  * CPU-side proposal metadata for emissive triangle sampling.
  *
- * <p>Every extracted triangle stores nine position floats followed by an estimate of its average
- * emitted luminance. The estimate is used only to build the proposal distribution; the selected
- * point is still traced through the regular closest-hit material path for the exact texture,
- * tint, orientation and occlusion.</p>
+ * <p>Every extracted triangle stores positions, proposal power, three corner UVs, material ID and
+ * primitive fallback emission. The estimate is used only to build the triangle distribution; UV
+ * metadata lets raygen importance-resample the authored emission mask before the selected point is
+ * traced through the regular closest-hit material path for the exact texture, tint, orientation
+ * and occlusion.</p>
  */
 public final class RtEmissiveSampling {
-    public static final int FLOATS_PER_TRIANGLE = 10;
+    public static final int FLOATS_PER_TRIANGLE = 18;
     public static final int POWER_OFFSET = 9;
+    public static final int UV_OFFSET = 10;
+    public static final int MATERIAL_OFFSET = 16;
+    public static final int FALLBACK_OFFSET = 17;
+    public static final int GPU_ENTRY_BYTES = 80;
 
     private RtEmissiveSampling() {
     }
