@@ -150,6 +150,9 @@ final class RtReliefPathTracingShaderTest {
         assertTrue(raygen.contains("reservoir.sample.value - worldPush.camOffset"));
         assertTrue(raygen.contains("sampleData.xyz + worldPush.camOffset - worldPush.camDelta"));
         assertTrue(raygen.contains("!emissionCoveredByPreviousNee"));
+        assertTrue(raygen.contains("bool localRestirDomain = restirThisVertex"));
+        assertTrue(raygen.contains("float3 celestialVis = visibility(shadowP, celestialDir, 10000.0)"));
+        assertFalse(raygen.contains("RESTIR_LOCAL_MIX"));
         assertTrue(composite.contains("private static final int GUIDE_COUNT = 10"));
         assertTrue(composite.contains("worldPipeline.setExtraStorageImage(9, restirB1.view)"));
         assertTrue(composite.contains("flags |= 0b1000000000"));

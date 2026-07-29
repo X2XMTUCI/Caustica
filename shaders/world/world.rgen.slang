@@ -478,7 +478,6 @@ static const uint RESTIR_SPATIAL = 0x100u;
 static const uint RESTIR_HISTORY_VALID = 0x200u;
 static const float RESTIR_MAX_M = 32.0;
 static const float RESTIR_MAX_W = 64.0;
-static const float RESTIR_LOCAL_MIX = 0.5;
 
 struct EmissiveTriangle {
     float4 p0;
@@ -718,8 +717,8 @@ bool restirPreviousCandidate(int2 pixel, int2 size, float3 receiverNormal,
     return true;
 }
 
-RestirSample restirSelectDirect(int2 pixel, int2 size, float3 hitPos, float3 receiverNormal,
-                                float3 motionPrev, float3 v, float3 diffAlb, float3 F0,
+RestirSample restirSelectDirect(int2 pixel, int2 size, float3 receiverPos, float3 historyHitPos,
+                                float3 receiverNormal, float3 motionPrev, float3 v, float3 diffAlb, float3 F0,
                                 float rough, bool pbr, bool useHistory,
                                 inout uint seed, out float normalization) {
     RestirReservoir reservoir;
@@ -734,26 +733,25 @@ RestirSample restirSelectDirect(int2 pixel, int2 size, float3 hitPos, float3 rec
     [loop]
     for (int i = 0; i < candidates; ++i) {
         RestirSample candidate;
-        float sourceProbability = 1.0;
-        bool local = hasLocal && rndf(seed) < RESTIR_LOCAL_MIX;
-        if (local) {
+        if (hasLocal) {
             candidate = restirFreshLocal(seed);
-            sourceProbability = RESTIR_LOCAL_MIX;
         } else {
             candidate.value = worldPush.lightDir.xyz;
             if (worldPush.lightDir.w > 0.0) {
                 candidate.value = sampleSquare(candidate.value, worldPush.lightDir.w, seed);
             }
             candidate.measure = -1.0;
-            sourceProbability = hasLocal ? (1.0 - RESTIR_LOCAL_MIX) : 1.0;
         }
-        float pHat = restirPHat(candidate, hitPos, receiverNormal, v, diffAlb, F0, rough, pbr);
-        restirUpdate(reservoir, candidate, pHat, pHat / sourceProbability, 1.0, seed);
+        // Never mix the vastly brighter unoccluded celestial target into the local-light reservoir:
+        // indoors it would win selection, fail its final shadow test, and amplify the rare local sample
+        // by the cross-domain normalization. The celestial domain is evaluated independently below.
+        float pHat = restirPHat(candidate, receiverPos, receiverNormal, v, diffAlb, F0, rough, pbr);
+        restirUpdate(reservoir, candidate, pHat, pHat, 1.0, seed);
     }
 
     // Reproject this receiver into the previous frame. Dynamic geometry supplies its own displacement;
     // worldPush.camDelta converts current camera-relative coordinates into the previous rebase/camera.
-    float3 previousHitCamRel = hitPos - worldPush.camOffset + worldPush.camDelta - motionPrev;
+    float3 previousHitCamRel = historyHitPos - worldPush.camOffset + worldPush.camDelta - motionPrev;
     float4 previousClip = mul(worldPush.prevViewProj, float4(previousHitCamRel, 1.0));
     bool canReuse = useHistory && (worldPush.flags & RESTIR_HISTORY_VALID) != 0u
             && previousClip.w > 0.0;
@@ -785,7 +783,14 @@ RestirSample restirSelectDirect(int2 pixel, int2 size, float3 hitPos, float3 rec
                 expectedPreviousDepth, previousSample, previousW, previousM)) {
             continue;
         }
-        float pHat = restirPHat(previousSample, hitPos, receiverNormal,
+        // Geometry-list publication invalidates static history. This additional domain check covers a
+        // dynamic emitter appearing/disappearing between frames without letting a celestial reservoir
+        // contaminate the local one (or vice versa).
+        if ((hasLocal && previousSample.measure < 0.0)
+                || (!hasLocal && previousSample.measure > 0.0)) {
+            continue;
+        }
+        float pHat = restirPHat(previousSample, receiverPos, receiverNormal,
                 v, diffAlb, F0, rough, pbr);
         // Combine the previous reservoir as one weighted super-candidate:
         // w = pHat_current(y) * W_previous * M_previous.
@@ -800,7 +805,7 @@ RestirSample restirSelectDirect(int2 pixel, int2 size, float3 hitPos, float3 rec
     normalization = reservoir.selectedPHat > 1.0e-8 && reservoir.M > 0.0
             ? clamp(reservoir.weightSum / (reservoir.M * reservoir.selectedPHat), 0.0, RESTIR_MAX_W)
             : 0.0;
-    float receiverDepth = length(hitPos - worldPush.camOffset);
+    float receiverDepth = length(historyHitPos - worldPush.camOffset);
     if (useHistory) {
         float3 storedValue = reservoir.sample.measure > 0.0
                 ? reservoir.sample.value - worldPush.camOffset
@@ -1395,8 +1400,9 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, bool useRestirPr
         float restirNormalization = 1.0;
         bool restirThisVertex = (worldPush.flags & RESTIR_ENABLED) != 0u;
         bool restirHistoryVertex = useRestirPrimary && bounce == 0;
+        bool localRestirDomain = restirThisVertex && worldPush.breakingPad2 > 0u;
         if (restirThisVertex) {
-            directSample = restirSelectDirect(pixel, imageSize, hitPos, n, payload.motionPrev,
+            directSample = restirSelectDirect(pixel, imageSize, shadowP, hitPos, n, payload.motionPrev,
                     v, diffAlb, F0, rough, pbr, restirHistoryVertex, seed, restirNormalization);
         } else if (worldPush.lightDir.w > 0.0) {
             directSample.value = sampleSquare(directSample.value, worldPush.lightDir.w, seed);
@@ -1429,9 +1435,33 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, bool useRestirPr
             }
         }
 
-        // The all-light proposal mixture integrates every registered local emitter, irrespective of
-        // whether this frame's selected representative happened to be celestial or local.
-        emissionCoveredByPreviousNee = restirThisVertex && worldPush.breakingPad2 > 0u;
+        // Keep the analytic celestial domain independent from local geometry. Combining their raw
+        // unoccluded targets in one reservoir made an underground sun candidate dominate, then vanish
+        // at the final shadow test; the rare selected torch sample inherited that huge normalization
+        // and appeared as a bright needle. A separate one-candidate celestial reservoir is exact here
+        // because the sun/moon is the only light in this analytic domain.
+        if (localRestirDomain) {
+            float3 celestialDir = worldPush.lightDir.xyz;
+            if (worldPush.lightDir.w > 0.0) {
+                celestialDir = sampleSquare(celestialDir, worldPush.lightDir.w, seed);
+            }
+            float celestialHeightVis = traceReliefVisibility(celestialDir, hitCameraDistance);
+            if (celestialHeightVis > 0.001) {
+                float3 celestialTarget = restirCelestialTarget(
+                        n, v, celestialDir, diffAlb, F0, rough, pbr);
+                float3 celestialVis = visibility(shadowP, celestialDir, 10000.0)
+                        * celestialHeightVis;
+                if (inWater && waterWaves && shadowVis.a > 0.0) {
+                    celestialVis *= waterCaustic(
+                            shadowP + celestialDir * shadowVis.a, celestialDir, shadowVis.a);
+                }
+                if (max(celestialVis.r, max(celestialVis.g, celestialVis.b)) > 0.0) {
+                    L += throughput * celestialTarget * celestialVis;
+                }
+            }
+        }
+
+        emissionCoveredByPreviousNee = localRestirDomain;
 
         // Thin-surface SSS transmission. Light entering from the back face scatters through toward the
         // viewer via a forward-biased HG phase (leaves/grass backlit by the sun glow when you look
