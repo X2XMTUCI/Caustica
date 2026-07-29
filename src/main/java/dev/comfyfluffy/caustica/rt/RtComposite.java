@@ -101,6 +101,13 @@ public final class RtComposite {
     // Hot addresses/frameIndex and raygen's debugView avoid unnecessary global-memory dereferences;
     // WorldPushConstantsData is generated from the same Slang module and owns this second ABI as well.
     private static final int GUIDE_COUNT = 10; // six RR guides + four ReSTIR reservoir images, bindings 3..12
+    private static final int EMISSIVE_LIGHT_ENTRY_BYTES = 48; // three float4 vertices
+    private static final int MAX_EMISSIVE_LIGHT_TRIANGLES = 65_536;
+    // Keep capacity for moving entities and block entities even in an emissive-heavy resident terrain
+    // set. Static real + distant geometry uses the rest of the stable BDA array.
+    private static final int STATIC_EMISSIVE_LIGHT_TRIANGLE_LIMIT = 60_000;
+    private static final long EMISSIVE_LIGHT_BUFFER_BYTES =
+            (long) EMISSIVE_LIGHT_ENTRY_BYTES * MAX_EMISSIVE_LIGHT_TRIANGLES;
     // Frames a retired per-frame TLAS must outlive before it's freed (> frames-in-flight); matches
     // RtTerrain's deferred-free horizon. The frame TLAS is built + traced this frame, then freed once
     // the composite frame counter has advanced this far past it (so no in-flight frame still reads it).
@@ -236,8 +243,9 @@ public final class RtComposite {
     private RtImage gMotion;
     private RtImage gSpecAlbedo;
     private RtImage gSpecMotion;
-    // ReSTIR DI history: two RGBA16F images per ping-pong frame. reservoir0 stores selected light
-    // direction + RIS normalization; reservoir1 stores encoded receiver normal, depth and sample count.
+    // ReSTIR DI history: two RGBA16F images per ping-pong frame. reservoir0 stores a celestial
+    // direction or camera-relative local-emitter point plus its domain measure; reservoir1 stores the
+    // encoded receiver normal, depth and packed RIS normalization/sample count.
     private RtImage restirA0;
     private RtImage restirA1;
     private RtImage restirB0;
@@ -245,6 +253,13 @@ public final class RtComposite {
     private boolean restirHistoryValid;
     private boolean restirWasEnabled;
     private Object restirLevel;
+    private RtBuffer emissiveLightBuffer;
+    private long emissiveTerrainRevision = Long.MIN_VALUE;
+    private long emissiveDistantRevision = Long.MIN_VALUE;
+    private int emissiveRebaseX = Integer.MIN_VALUE;
+    private int emissiveRebaseY = Integer.MIN_VALUE;
+    private int emissiveRebaseZ = Integer.MIN_VALUE;
+    private int staticEmissiveLightCount;
     // Display-res RT image the display mapper reads: DLSS-RR writes it (render -> display denoise+upscale), or a
     // linear blit of `output` fills it when RR is off/unavailable (the no-RR reference / fallback).
     private RtImage rrOutput;
@@ -536,6 +551,13 @@ public final class RtComposite {
                             VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, "rt world push " + i);
                 }
             }
+            if (emissiveLightBuffer == null) {
+                emissiveLightBuffer = ctx.createBuffer(EMISSIVE_LIGHT_BUFFER_BYTES,
+                        VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, "ReSTIR emissive triangle list");
+                emissiveTerrainRevision = Long.MIN_VALUE;
+                emissiveDistantRevision = Long.MIN_VALUE;
+                staticEmissiveLightCount = 0;
+            }
             if (output != null) {
                 worldPipeline.setStorageImage(output.view);
                 bindGuideImages();
@@ -633,6 +655,8 @@ public final class RtComposite {
         reloadRebindRequested = true;
         materialBindingsReady = false;
         restirHistoryValid = false;
+        emissiveTerrainRevision = Long.MIN_VALUE;
+        emissiveDistantRevision = Long.MIN_VALUE;
         setCelestialUvAtlas(0L);
         RtEntities.INSTANCE.onResourceReload();
         RtContext ctx = RtContext.currentOrNull();
@@ -807,6 +831,51 @@ public final class RtComposite {
         mvHasPrev = true;
     }
 
+    /**
+     * Maintain one stable BDA list shared by real terrain, DH/Voxy proxies and dynamic capture.
+     * Static triangles are rewritten only after publication/rebase changes; entity emitters append each
+     * frame because their already-existing pose capture can move or animate them.
+     */
+    private int updateEmissiveLights(RtTerrain terrain) {
+        if (emissiveLightBuffer == null) {
+            return 0;
+        }
+        long terrainRevision = terrain.emissiveRevision();
+        long distantRevision = RtDistantHorizonsTerrain.INSTANCE.emissiveRevision();
+        boolean rebaseChanged = terrain.blockX != emissiveRebaseX
+                || terrain.blockY != emissiveRebaseY || terrain.blockZ != emissiveRebaseZ;
+        boolean rebuildStatic = rebaseChanged || terrainRevision != emissiveTerrainRevision
+                || distantRevision != emissiveDistantRevision;
+        ByteBuffer dst = MemoryUtil.memByteBuffer(
+                emissiveLightBuffer.mapped, Math.toIntExact(EMISSIVE_LIGHT_BUFFER_BYTES))
+                .order(ByteOrder.nativeOrder());
+        if (rebuildStatic) {
+            int count = terrain.writeEmissiveTriangles(dst, 0, STATIC_EMISSIVE_LIGHT_TRIANGLE_LIMIT,
+                    terrain.blockX, terrain.blockY, terrain.blockZ);
+            count = RtDistantHorizonsTerrain.INSTANCE.writeEmissiveTriangles(
+                    dst, count, STATIC_EMISSIVE_LIGHT_TRIANGLE_LIMIT,
+                    terrain.blockX, terrain.blockY, terrain.blockZ);
+            staticEmissiveLightCount = count;
+            emissiveTerrainRevision = terrainRevision;
+            emissiveDistantRevision = distantRevision;
+            emissiveRebaseX = terrain.blockX;
+            emissiveRebaseY = terrain.blockY;
+            emissiveRebaseZ = terrain.blockZ;
+            // Stored local-light positions use rebase coordinates. Geometry publication can also remove
+            // a selected emitter, so do not carry those reservoirs across either event.
+            restirHistoryValid = false;
+        }
+        int total = RtEntities.INSTANCE.writeEmissiveTriangles(
+                dst, staticEmissiveLightCount, MAX_EMISSIVE_LIGHT_TRIANGLES);
+        long flushOffset = rebuildStatic ? 0L : (long) staticEmissiveLightCount * EMISSIVE_LIGHT_ENTRY_BYTES;
+        long flushEnd = (long) total * EMISSIVE_LIGHT_ENTRY_BYTES;
+        if (flushEnd > flushOffset) {
+            emissiveLightBuffer.flush(flushOffset, flushEnd - flushOffset);
+        }
+        RtFrameStats.FRAME.count("restirEmissiveTriangles", total);
+        return total;
+    }
+
     private void recordFrame(RtContext ctx, RtPipeline active, GpuTexture nativeColor) {
         long dstImage = vkImage(nativeColor);
         var encoder = (VulkanCommandEncoder) ((CommandEncoderAccessor) RenderSystem.getDevice().createCommandEncoder()).caustica$getBackend();
@@ -908,6 +977,8 @@ public final class RtComposite {
                     terrain.staticInstances(), terrain.blockX, terrain.blockY, terrain.blockZ);
             RtEntities.FrameEntities fe = RtEntities.INSTANCE.beginFrame(ctx, staticInstances,
                     terrain.blockX, terrain.blockY, terrain.blockZ, camX, camY, camZ, frameProjection, frameViewRotation);
+            int emissiveLightCount = restirEnabled ? updateEmissiveLights(terrain) : 0;
+            long emissiveLightAddress = emissiveLightCount == 0 ? 0L : emissiveLightBuffer.deviceAddress;
             // Block-breaking overlay: resolves each destroy-stage RenderType's texture into the
             // SAME bindless entity-texture array (destroy_stage_N.png is a standalone Sampler0 texture,
             // not a block-atlas sprite — see ModelBakery.BREAKING_LOCATIONS/DESTROY_TYPES), so any newly
@@ -955,9 +1026,9 @@ public final class RtComposite {
                     waterAnchor,
                     mvCurProjView,
                     breaking.length,
-                    0,
-                    0,
-                    0,
+                    (int) emissiveLightAddress,
+                    (int) (emissiveLightAddress >>> 32),
+                    emissiveLightCount,
                     breaking,
                     parallaxParams,
                     fogParams,
@@ -1333,6 +1404,13 @@ public final class RtComposite {
             }
             pushRing = null;
         }
+        if (emissiveLightBuffer != null) {
+            emissiveLightBuffer.destroy();
+            emissiveLightBuffer = null;
+        }
+        emissiveTerrainRevision = Long.MIN_VALUE;
+        emissiveDistantRevision = Long.MIN_VALUE;
+        staticEmissiveLightCount = 0;
         if (atlasSampler != 0L) {
             RtContext ctx = RtContext.currentOrNull();
             if (ctx != null) {

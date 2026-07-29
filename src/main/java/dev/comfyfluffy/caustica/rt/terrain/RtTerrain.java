@@ -191,6 +191,9 @@ public final class RtTerrain {
     // any-hit path whether that exact vanilla section is already represented by the live RT table.
     private int[] distantReadyMaskWords = new int[0];
     private boolean distantReadyMaskDirty = true;
+    // Monotonic CPU-light-list revision. ReSTIR only repacks static emissive triangles when geometry
+    // actually publishes/evicts; steady frames append dynamic entity emitters without rescanning terrain.
+    private long emissiveRevision = 1L;
     // When the last streaming pass ran on a render frame — the tick fallback watches this (see
     // STREAM_FALLBACK_AFTER_NANOS).
     private long lastFrameStreamNanos;
@@ -242,6 +245,43 @@ public final class RtTerrain {
     /** Section table device address: {@code {u64 primAddr, u64 uvAddr, u32 triBase[4]}} per section, indexed by gl_InstanceCustomIndexEXT. */
     public long tableAddress() {
         return table.address();
+    }
+
+    public long emissiveRevision() {
+        return emissiveRevision;
+    }
+
+    /**
+     * Append published real-chunk emissive triangles to the mapped ReSTIR light buffer.
+     * Each 48-byte entry is three float4 vertices; w is reserved for shader-side metadata.
+     */
+    public int writeEmissiveTriangles(ByteBuffer dst, int firstEntry, int maxEntries,
+                                      int rebaseX, int rebaseY, int rebaseZ) {
+        int count = firstEntry;
+        ObjectIterator<Long2ObjectMap.Entry<SectionGeom>> it = resident.long2ObjectEntrySet().fastIterator();
+        while (it.hasNext() && count < maxEntries) {
+            SectionGeom geom = it.next().getValue();
+            if (!published.contains(geom.key) || geom.emissiveTriangles.length == 0) {
+                continue;
+            }
+            float tx = geom.sx - rebaseX;
+            float ty = geom.sy - rebaseY;
+            float tz = geom.sz - rebaseZ;
+            float[] triangles = geom.emissiveTriangles;
+            for (int base = 0; base + 8 < triangles.length && count < maxEntries; base += 9) {
+                int out = count * 48;
+                for (int corner = 0; corner < 3; corner++) {
+                    int source = base + corner * 3;
+                    int target = out + corner * 16;
+                    dst.putFloat(target, triangles[source] + tx);
+                    dst.putFloat(target + 4, triangles[source + 1] + ty);
+                    dst.putFloat(target + 8, triangles[source + 2] + tz);
+                    dst.putFloat(target + 12, 0.0f);
+                }
+                count++;
+            }
+        }
+        return count;
     }
 
     /** Per-tick residency update: window sync + dirty drain (plus the streaming fallback, see {@link #frame}). */
@@ -1521,6 +1561,7 @@ public final class RtTerrain {
 
     private void applyBuildChanges(RtContext ctx, List<PreparedSection> prepared, List<SectionGeom> removed,
                                    boolean rebase, int rbx, int rby, int rbz) {
+        boolean emissiveSetChanged = rebase || !prepared.isEmpty() || !removed.isEmpty();
         long lastGraphicsUse = ctx.gpuExecutor().latestGraphicsUseValue();
         int baseX = rebase ? rbx : blockX;
         int baseY = rebase ? rby : blockY;
@@ -1542,7 +1583,7 @@ public final class RtTerrain {
         for (PreparedSection ps : prepared) {
             SectionGeom g = new SectionGeom(ps.key(), ps.uvs(), ps.material(),
                     ps.blas().accel, ps.triBase(), ps.triangleCount(),
-                    ps.sx(), ps.sy(), ps.sz());
+                    ps.sx(), ps.sy(), ps.sz(), ps.emissiveTriangles());
             if (!desired.contains(ps.key())) {
                 // Left the window while its batched BLAS build was in flight (window sync keeps running
                 // during builds). Never published — retire the fresh, unreferenced geometry.
@@ -1569,6 +1610,9 @@ public final class RtTerrain {
             published.add(ps.key());
         }
         table.flushWrites();
+        if (emissiveSetChanged) {
+            emissiveRevision++;
+        }
 
         if (resident.isEmpty()) {
             Generation emptyGeneration = table.detachGeneration();

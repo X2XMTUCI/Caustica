@@ -13,6 +13,7 @@ import dev.comfyfluffy.caustica.rt.material.RtMaterialAbi;
 import dev.comfyfluffy.caustica.rt.material.RtBlockMaterials;
 import dev.comfyfluffy.caustica.rt.material.RtMaterials;
 import dev.comfyfluffy.caustica.rt.material.RtMaterialRegistry;
+import dev.comfyfluffy.caustica.rt.material.RtMaterialDesc;
 import it.unimi.dsi.fastutil.floats.FloatArrayList;
 import it.unimi.dsi.fastutil.ints.IntArrayList;
 import it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap;
@@ -116,10 +117,10 @@ final class RtTerrainMesher {
         RtAccel.OpacityMicromapInput ommInput =
                 RtTerrainOmm.buildInput(cutout.triCount(), cutout.cornerUv.elements(),
                         cutout.ommSprites.elements(), cutout.ommSprites.size());
-        return new CpuSection(packSection(mesh), ommInput);
+        return new CpuSection(packSection(mesh, materials), ommInput);
     }
 
-    private static PackedSection packSection(SectionMesh mesh) {
+    private static PackedSection packSection(SectionMesh mesh, RtMaterialRegistry.Snapshot materials) {
         Geom[] buckets = mesh.buckets(); // { solid, cutout, translucent, water }, indexed by RtAccel.BUCKET_*
         int vertFloats = 0, idxCount = 0, uvFloats = 0, primFloats = 0, triCount = 0;
         int[] bucketTris = new int[buckets.length];
@@ -164,7 +165,45 @@ final class RtTerrainMesher {
             vertBase += vertSize / 3;
             triAcc += bucketTris[b];
         }
-        return new PackedSection(positions, indices, uvs, material, bucketTris, triBase);
+        return new PackedSection(positions, indices, uvs, material, bucketTris, triBase,
+                extractEmissiveTriangles(positions, indices, material, materials));
+    }
+
+    /**
+     * Extract the actual triangles whose resolved material can emit. Positions remain section/entity
+     * local; the owner applies its TLAS translation while filling the frame's ReSTIR light list.
+     *
+     * <p>The list is deliberately geometry-only. Raygen traces the finally selected sample back through
+     * the normal closest-hit material path, so LabPBR/override/heuristic texture masks and tint are
+     * evaluated at the exact sampled texel instead of approximating an entire block as uniformly bright.</p>
+     */
+    static float[] extractEmissiveTriangles(float[] positions, int[] indices, float[] material,
+                                            RtMaterialRegistry.Snapshot materials) {
+        FloatArrayList lights = new FloatArrayList();
+        int triangleCount = indices.length / 3;
+        for (int tri = 0; tri < triangleCount; tri++) {
+            int primBase = tri * 12;
+            float encodedEmission = material[primBase + 3];
+            float fallbackEmission = encodedEmission >= 1.5f ? encodedEmission - 2.0f : encodedEmission;
+            int materialId = Float.floatToRawIntBits(material[primBase + 8]);
+            if (materialId < 0 || materialId >= materials.materialCount()) {
+                continue;
+            }
+            RtMaterialDesc desc = materials.material(materialId);
+            if (desc.model() != RtMaterialRegistry.MODEL_OPAQUE
+                    || (fallbackEmission <= 0.0f
+                    && desc.emissionSource() == RtMaterialDesc.EmissionSource.NONE
+                    && !desc.emissionSummary().emissive())) {
+                continue;
+            }
+            for (int corner = 0; corner < 3; corner++) {
+                int vertex = indices[tri * 3 + corner] * 3;
+                lights.add(positions[vertex]);
+                lights.add(positions[vertex + 1]);
+                lights.add(positions[vertex + 2]);
+            }
+        }
+        return lights.toFloatArray();
     }
 
     private static void tessellate(BlockAndTintGetter region, BlockStateModelSet modelSet,
@@ -224,7 +263,7 @@ final class RtTerrainMesher {
 
     /** Worker-packed terrain payload; native preparation allocates buffers and bulk-copies these arrays. */
     record PackedSection(float[] positions, int[] indices, float[] uvs, float[] material,
-                         int[] bucketTris, int[] triBase) {
+                         int[] bucketTris, int[] triBase, float[] emissiveTriangles) {
     }
 
 

@@ -74,12 +74,12 @@ final class RtSectionBuilder {
                     packed.bucketTris(), ommInput, label + " BLAS");
             return new PreparedSection(key, positions, indices, uvs, material, upload, blas,
                     packed.triBase(), packed.indices().length / 3,
-                    sox, soy, soz);
+                    sox, soy, soz, packed.emissiveTriangles());
         } catch (Throwable t) {
             if (blas != null) {
                 destroy(new PreparedSection(key, positions, indices, uvs, material, upload, blas,
                         packed.triBase(), packed.indices().length / 3,
-                        sox, soy, soz));
+                        sox, soy, soz, packed.emissiveTriangles()));
             } else {
                 if (upload != null) upload.destroy();
                 if (material != null) material.destroy();
@@ -139,7 +139,7 @@ final class RtSectionBuilder {
     /** Worker-owned native section state paired with its prepared BLAS. */
     record PreparedSection(long key, RtBuffer positions, RtBuffer indices, RtBuffer uvs,
                            RtBuffer material, RtBuffer upload, RtAccel.PreparedBlas blas, int[] triBase,
-                           int triangleCount, int sx, int sy, int sz) {
+                           int triangleCount, int sx, int sy, int sz, float[] emissiveTriangles) {
         void releaseUpload() {
             upload.destroy();
         }
@@ -151,7 +151,7 @@ final class RtSectionBuilder {
 
         PreparedSection withBlas(RtAccel.PreparedBlas replacement) {
             return new PreparedSection(key, positions, indices, uvs, material, upload, replacement,
-                    triBase, triangleCount, sx, sy, sz);
+                    triBase, triangleCount, sx, sy, sz, emissiveTriangles);
         }
     }
 }

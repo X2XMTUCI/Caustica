@@ -125,10 +125,14 @@ final class RtReliefPathTracingShaderTest {
     }
 
     @Test
-    void restirUsesValidatedPingPongReservoirsAndOneSelectedShadowRay() throws IOException {
+    void restirUsesValidatedReservoirsForCelestialAndTexturedEmissiveGeometry() throws IOException {
         String raygen = shader("world.rgen.slang");
         String composite = Files.readString(Path.of("src", "main", "java", "dev", "comfyfluffy",
                 "caustica", "rt", "RtComposite.java"));
+        String terrainMesher = Files.readString(Path.of("src", "main", "java", "dev", "comfyfluffy",
+                "caustica", "rt", "terrain", "RtTerrainMesher.java"));
+        String entities = Files.readString(Path.of("src", "main", "java", "dev", "comfyfluffy",
+                "caustica", "rt", "entity", "RtEntities.java"));
 
         assertTrue(raygen.contains("RESTIR_HISTORY_VALID"));
         assertTrue(raygen.contains("restirLoadPreviousSample"));
@@ -138,9 +142,25 @@ final class RtReliefPathTracingShaderTest {
         assertTrue(raygen.contains("restirNormalization"));
         assertTrue(raygen.contains("visibility(shadowP, lightDir, 10000.0) * heightVis"));
         assertFalse(raygen.contains("visibility(shadowP, candidateDir"));
+        assertTrue(raygen.contains("struct EmissiveTriangle"));
+        assertTrue(raygen.contains("RestirSample restirFreshLocal"));
+        assertTrue(raygen.contains("float3 restirLocalTarget"));
+        assertTrue(raygen.contains("payload.albedo * emission * EMISSIVE_STRENGTH"));
+        assertTrue(raygen.contains("bool restirThisVertex = (worldPush.flags & RESTIR_ENABLED) != 0u"));
+        assertTrue(raygen.contains("reservoir.sample.value - worldPush.camOffset"));
+        assertTrue(raygen.contains("sampleData.xyz + worldPush.camOffset - worldPush.camDelta"));
+        assertTrue(raygen.contains("!emissionCoveredByPreviousNee"));
         assertTrue(composite.contains("private static final int GUIDE_COUNT = 10"));
         assertTrue(composite.contains("worldPipeline.setExtraStorageImage(9, restirB1.view)"));
         assertTrue(composite.contains("flags |= 0b1000000000"));
+        assertTrue(composite.contains("MAX_EMISSIVE_LIGHT_TRIANGLES = 65_536"));
+        assertTrue(composite.contains("STATIC_EMISSIVE_LIGHT_TRIANGLE_LIMIT = 60_000"));
+        assertTrue(composite.contains("(int) emissiveLightAddress"));
+        assertTrue(composite.contains("emissiveLightCount"));
+        assertTrue(terrainMesher.contains("extractEmissiveTriangles"));
+        assertTrue(terrainMesher.contains("desc.emissionSource() == RtMaterialDesc.EmissionSource.NONE"));
+        assertTrue(entities.contains("snapshotEmissiveCapture"));
+        assertTrue(entities.contains("writeEmissiveTriangles"));
     }
 
     @Test

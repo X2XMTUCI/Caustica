@@ -37,11 +37,14 @@ import dev.comfyfluffy.caustica.rt.RtContext;
 import dev.comfyfluffy.caustica.rt.RtFrameStats;
 import dev.comfyfluffy.caustica.rt.accel.RtAccel;
 import dev.comfyfluffy.caustica.rt.accel.RtBuffer;
+import dev.comfyfluffy.caustica.rt.material.RtMaterialDesc;
+import dev.comfyfluffy.caustica.rt.material.RtMaterialRegistry;
 import dev.comfyfluffy.caustica.rt.pipeline.RtPipeline;
 
 import it.unimi.dsi.fastutil.floats.FloatArrayList;
 import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.ints.IntArrayList;
+import java.nio.ByteBuffer;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -189,6 +192,9 @@ public final class RtEntities {
     private final RtParticleCapture particleCapture = new RtParticleCapture(capture);
     private final QuadParticleRenderState particleScratch = new QuadParticleRenderState();
     private final FloatArrayList particleDisp = new FloatArrayList();
+    // Current-frame emissive entity/block-entity triangles in terrain-rebased coordinates. This is
+    // rebuilt as a side effect of the existing capture pass, so ReSTIR adds no second model traversal.
+    private final FloatArrayList emissiveTriangles = new FloatArrayList();
     private IdentityHashMap<Particle, ParticlePrev> particlePrev = new IdentityHashMap<>();
     private IdentityHashMap<Particle, ParticlePrev> particleCur = new IdentityHashMap<>();
     private final float[] particleCenterScratch = new float[3];
@@ -304,6 +310,7 @@ public final class RtEntities {
         long meshHash;                           // hash of the captured mesh — rebuild only when it changes
         long lastSeen;                           // last frame this BE was in the scan window — for eviction
         float[] prevVerts;                       // block-local verts at this build, for the per-vertex MV diff
+        float[] emissiveTriangles;               // block-local emitting triangles, refreshed with the mesh
     }
 
     /** One persistent updatable AS in an entity's ring: its own backing buffer + the topology it
@@ -348,6 +355,25 @@ public final class RtEntities {
     /** This frame's terrain and dynamic instance segments, entity BLAS builds, and geometry-table address. */
     public record FrameEntities(List<RtAccel.Instance> baseInstances, List<RtAccel.Instance> dynamicInstances,
                                 List<RtAccel.PreparedBlas> blas, long geomTableAddr) {
+    }
+
+    /** Append current-frame dynamic emitters to the mapped 48-byte ReSTIR triangle list. */
+    public int writeEmissiveTriangles(ByteBuffer dst, int firstEntry, int maxEntries) {
+        int count = firstEntry;
+        float[] triangles = emissiveTriangles.elements();
+        for (int base = 0; base + 8 < emissiveTriangles.size() && count < maxEntries; base += 9) {
+            int out = count * 48;
+            for (int corner = 0; corner < 3; corner++) {
+                int source = base + corner * 3;
+                int target = out + corner * 16;
+                dst.putFloat(target, triangles[source]);
+                dst.putFloat(target + 4, triangles[source + 1]);
+                dst.putFloat(target + 8, triangles[source + 2]);
+                dst.putFloat(target + 12, 0.0f);
+            }
+            count++;
+        }
+        return count;
     }
 
     /** One glowing entity's body mesh (rebased-space positions, copied out of {@link #capture} before the
@@ -573,6 +599,7 @@ public final class RtEntities {
     public FrameEntities beginFrame(RtContext ctx, List<RtAccel.Instance> base, int rbx, int rby, int rbz,
                                     double camX, double camY, double camZ, Matrix4f projection, Matrix4f viewRotation) {
         processDeferred();
+        emissiveTriangles.clear();
         if (!enabled()) {
             return new FrameEntities(base, List.of(), List.of(), 0L);
         }
@@ -1179,6 +1206,7 @@ public final class RtEntities {
         e.meshHash = hash;
         // Retain this build's block-local verts so the next rebuild can diff against them for the MV.
         e.prevVerts = java.util.Arrays.copyOf(capture.verts.elements(), capture.verts.size());
+        e.emissiveTriangles = snapshotEmissiveCapture();
         return e;
     }
 
@@ -1222,6 +1250,7 @@ public final class RtEntities {
         float[] xform = {1, 0, 0, e.bx - rbx, 0, 1, 0, e.by - rby, 0, 0, 1, e.bz - rbz};
         build.instances.add(new RtAccel.Instance(xform, e.accel.deviceAddress,
                 ENTITY_BIT | (build.count & 0x7FFFFF), 0xFF, RtAccel.SBT_ENTITY_OFFSET));
+        appendCachedEmissive(e.emissiveTriangles, xform);
         build.count++;
         build.logicalCount++;
         RtFrameStats.FRAME.count("blockEntitiesCaptured", 1);
@@ -1349,9 +1378,11 @@ public final class RtEntities {
         ea.lastSeen = RtComposite.frameCounter();
         writeTableEntry(build, ea.refPrimAddr, ea.refIndexAddr, ea.refUvAddr,
                 motion.dispAddr, motion.rigidX, motion.rigidY, motion.rigidZ, ea.refBucketTris);
-        build.instances.add(new RtAccel.Instance(placeTransform(localTransform, placeX, placeY, placeZ),
+        float[] placedTransform = placeTransform(localTransform, placeX, placeY, placeZ);
+        build.instances.add(new RtAccel.Instance(placedTransform,
                 ea.refAccel.deviceAddress,
                 ENTITY_BIT | (build.count & 0x3FFFFF), mask, RtAccel.SBT_ENTITY_OFFSET));
+        collectEmissiveCapture(placedTransform);
         build.count++;
         RtFrameStats.FRAME.count("entityReuse", 1);
         return true;
@@ -1427,6 +1458,69 @@ public final class RtEntities {
                 local[8], local[9], local[10], local[11] + z};
     }
 
+    private void collectEmissiveCapture(float[] transform) {
+        appendEmissiveCapture(emissiveTriangles, transform);
+    }
+
+    private float[] snapshotEmissiveCapture() {
+        FloatArrayList result = new FloatArrayList();
+        appendEmissiveCapture(result, IDENTITY);
+        return result.toFloatArray();
+    }
+
+    /**
+     * Reuse the already captured triangle/material arrays. The endpoint ray evaluates the exact texture
+     * mask, so this CPU filter only answers whether a primitive can emit at any texel.
+     */
+    private void appendEmissiveCapture(FloatArrayList destination, float[] transform) {
+        int triangleCount = capture.idx.size() / 3;
+        int[] indices = capture.idx.elements();
+        float[] vertices = capture.verts.elements();
+        float[] primitives = capture.prim.elements();
+        RtMaterialRegistry.Snapshot materials = RtMaterialRegistry.INSTANCE.requireSnapshot();
+        for (int tri = 0; tri < triangleCount; tri++) {
+            int primBase = tri * 12;
+            float fallbackEmission = primitives[primBase + 3];
+            int materialId = Float.floatToRawIntBits(primitives[primBase + 8]);
+            if (materialId < 0 || materialId >= materials.materialCount()) {
+                continue;
+            }
+            RtMaterialDesc desc = materials.material(materialId);
+            if (desc.model() != RtMaterialRegistry.MODEL_OPAQUE
+                    || (fallbackEmission <= 0.0f
+                    && desc.emissionSource() == RtMaterialDesc.EmissionSource.NONE
+                    && !desc.emissionSummary().emissive())) {
+                continue;
+            }
+            for (int corner = 0; corner < 3; corner++) {
+                int source = indices[tri * 3 + corner] * 3;
+                float x = vertices[source];
+                float y = vertices[source + 1];
+                float z = vertices[source + 2];
+                destination.add(transform[0] * x + transform[1] * y + transform[2] * z + transform[3]);
+                destination.add(transform[4] * x + transform[5] * y + transform[6] * z + transform[7]);
+                destination.add(transform[8] * x + transform[9] * y + transform[10] * z + transform[11]);
+            }
+        }
+    }
+
+    private void appendCachedEmissive(float[] triangles, float[] transform) {
+        if (triangles == null) {
+            return;
+        }
+        for (int base = 0; base + 8 < triangles.length; base += 9) {
+            for (int corner = 0; corner < 3; corner++) {
+                int source = base + corner * 3;
+                float x = triangles[source];
+                float y = triangles[source + 1];
+                float z = triangles[source + 2];
+                emissiveTriangles.add(transform[0] * x + transform[1] * y + transform[2] * z + transform[3]);
+                emissiveTriangles.add(transform[4] * x + transform[5] * y + transform[6] * z + transform[7]);
+                emissiveTriangles.add(transform[8] * x + transform[9] * y + transform[10] * z + transform[11]);
+            }
+        }
+    }
+
     /**
      * FNV-1a over the capture's shading data that must match for AS reuse: UVs plus each prim record's
      * emission/tint/material lanes. Prim NORMALS are deliberately excluded — they rotate with the pose,
@@ -1469,6 +1563,7 @@ public final class RtEntities {
         beginBuildIfNeeded(ctx, build);
         if (entityId >= 0) {
             appendPackedEntity(ctx, build, motion, entityId, instanceBit, mask, instanceTransform);
+            collectEmissiveCapture(instanceTransform);
             return;
         }
         int asInput = org.lwjgl.vulkan.KHRAccelerationStructure.VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;

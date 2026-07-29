@@ -204,11 +204,13 @@ final class RtSectionTable {
         final int sx;
         final int sy;
         final int sz;
+        final float[] emissiveTriangles;
         int slot = -1;
         int instanceIndex = -1;
 
         SectionGeom(long key, RtBuffer uvs, RtBuffer material,
-                    RtAccel blas, int[] triBase, int triangleCount, int sx, int sy, int sz) {
+                    RtAccel blas, int[] triBase, int triangleCount, int sx, int sy, int sz,
+                    float[] emissiveTriangles) {
             this.key = key;
             this.uvs = uvs;
             this.material = material;
@@ -218,6 +220,7 @@ final class RtSectionTable {
             this.sx = sx;
             this.sy = sy;
             this.sz = sz;
+            this.emissiveTriangles = emissiveTriangles;
         }
 
         void destroy() {

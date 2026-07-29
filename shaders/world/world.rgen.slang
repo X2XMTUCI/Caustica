@@ -33,8 +33,9 @@ import world_common;
 [[vk::binding(6, 0)]] [format("rg16f")]   RWTexture2D<float2> gMotion;     // screen-space motion (render px)
 [[vk::binding(7, 0)]] [format("rgba16f")] RWTexture2D<float4> gSpecAlbedo; // specular albedo (0 — diffuse-only)
 [[vk::binding(8, 0)]] [format("rg16f")]   RWTexture2D<float2> gSpecMotion; // reflection MVs for RR
-// ReSTIR DI ping-pong history. sample = selected direction.xyz + RIS normalization;
-// surface = oct-encoded normal.xy + camera distance + effective sample count.
+// ReSTIR DI ping-pong history. A celestial sample stores its direction; a local sample stores its
+// point relative to the current camera so RGBA16F keeps useful precision across distant/Voxy terrain.
+// surface = oct-encoded normal.xy + camera distance + packed RIS normalization/sample count.
 [[vk::binding(9, 0)]]  [format("rgba16f")] RWTexture2D<float4> restirA0;
 [[vk::binding(10, 0)]] [format("rgba16f")] RWTexture2D<float4> restirA1;
 [[vk::binding(11, 0)]] [format("rgba16f")] RWTexture2D<float4> restirB0;
@@ -466,20 +467,34 @@ float3 sampleSquare(float3 axis, float halfAngle, inout uint s) {
     return normalize(axis + u * right + v * up);
 }
 
-// ---- ReSTIR DI for the dominant celestial emitter -----------------------------------------------
-// The scene currently exposes the sun/moon square as its analytic NEE emitter. ReSTIR chooses among
-// several directions on that square, then reuses the selected direction from compatible receivers in
-// the previous frame. Only the final selected sample fires a visibility ray; all candidate target
-// evaluations are BRDF-only. Indirect vertices retain ordinary one-sample NEE because they have no
-// stable screen-space correspondence.
+// ---- ReSTIR DI: celestial + every emissive geometry material ------------------------------------
+// CPU extraction supplies real emitting triangles from terrain, DH/Voxy proxies, entities and block
+// entities. A fresh local candidate is a uniform point on one triangle. Reservoir history stores that
+// point rather than a list index, so chunk/entity list reordering cannot retarget an old reservoir.
+// The single selected local sample is traced through the normal closest-hit material path: LabPBR,
+// heuristic and override emission masks are therefore evaluated at the exact sampled texel.
 static const uint RESTIR_ENABLED = 0x80u;
 static const uint RESTIR_SPATIAL = 0x100u;
 static const uint RESTIR_HISTORY_VALID = 0x200u;
 static const float RESTIR_MAX_M = 32.0;
 static const float RESTIR_MAX_W = 64.0;
+static const float RESTIR_LOCAL_MIX = 0.5;
+
+struct EmissiveTriangle {
+    float4 p0;
+    float4 p1;
+    float4 p2;
+};
+
+struct RestirSample {
+    // measure < 0: value is a celestial direction. measure > 0: value is an emitter point and measure
+    // is triangleArea * triangleCount, the inverse of the conditional uniform triangle/area proposal.
+    float3 value;
+    float measure;
+};
 
 struct RestirReservoir {
-    float3 dir;
+    RestirSample sample;
     float weightSum;
     float selectedPHat;
     float M;
@@ -525,21 +540,35 @@ void restirStoreCurrent(int2 pixel, float4 sampleData, float4 surfaceData) {
     }
 }
 
-void restirUpdate(inout RestirReservoir reservoir, float3 dir, float pHat,
+float restirPackState(float normalization, float sampleCount) {
+    uint w = uint(round(saturate(normalization / RESTIR_MAX_W) * 255.0));
+    uint m = uint(clamp(round(sampleCount), 1.0, RESTIR_MAX_M));
+    // The payload stays below half exponent 0x1f, so image-store conversion preserves the bit pattern
+    // instead of canonicalizing a NaN. f32tof16(restored) recovers both quantized lanes.
+    return f16tof32((m << 8) | w);
+}
+
+void restirUnpackState(float packed, out float normalization, out float sampleCount) {
+    uint bits = f32tof16(packed);
+    normalization = float(bits & 0xffu) * (RESTIR_MAX_W / 255.0);
+    sampleCount = float((bits >> 8) & 0x3fu);
+}
+
+void restirUpdate(inout RestirReservoir reservoir, RestirSample sample, float pHat,
                   float candidateWeight, float candidateM, inout uint seed) {
     if (!(candidateWeight > 0.0) || !(candidateM > 0.0)) {
         return;
     }
     float newWeightSum = reservoir.weightSum + candidateWeight;
     if (rndf(seed) * newWeightSum < candidateWeight) {
-        reservoir.dir = dir;
+        reservoir.sample = sample;
         reservoir.selectedPHat = pHat;
     }
     reservoir.weightSum = newWeightSum;
     reservoir.M += candidateM;
 }
 
-float3 restirDirectTarget(float3 n, float3 v, float3 lightDir, float3 diffAlb,
+float3 restirBrdfResponse(float3 n, float3 v, float3 lightDir, float3 diffAlb,
                           float3 F0, float rough, bool pbr) {
     float ndl = max(0.0, dot(n, lightDir));
     if (ndl <= 0.0) {
@@ -556,13 +585,94 @@ float3 restirDirectTarget(float3 n, float3 v, float3 lightDir, float3 diffAlb,
         float3 F = fresnelSchlick(vdh, F0);
         brdf += (D * G) * F / (4.0 * ndv * ndl);
     }
-    return brdf * worldPush.lightRadiance.xyz * ndl;
+    return brdf * ndl;
+}
+
+float3 restirCelestialTarget(float3 n, float3 v, float3 lightDir, float3 diffAlb,
+                             float3 F0, float rough, bool pbr) {
+    return restirBrdfResponse(n, v, lightDir, diffAlb, F0, rough, pbr)
+            * worldPush.lightRadiance.xyz;
+}
+
+bool restirDirection(RestirSample sample, float3 hitPos, out float3 direction, out float distance) {
+    if (sample.measure < 0.0) {
+        float length2 = dot(sample.value, sample.value);
+        if (!(length2 > 0.8 && length2 < 1.2)) {
+            direction = float3(0.0, 1.0, 0.0);
+            distance = 0.0;
+            return false;
+        }
+        direction = normalize(sample.value);
+        distance = 10000.0;
+        return true;
+    }
+    float3 delta = sample.value - hitPos;
+    float distance2 = dot(delta, delta);
+    if (!(sample.measure > 0.0 && sample.measure < 65504.0)
+            || !(distance2 > 1.0e-4 && distance2 < 1.0e8)) {
+        direction = float3(0.0, 1.0, 0.0);
+        distance = 0.0;
+        return false;
+    }
+    distance = sqrt(distance2);
+    direction = delta / distance;
+    return true;
+}
+
+float restirPHat(RestirSample sample, float3 hitPos, float3 n, float3 v,
+                 float3 diffAlb, float3 F0, float rough, bool pbr) {
+    float3 direction;
+    float distance;
+    if (!restirDirection(sample, hitPos, direction, distance)) {
+        return 0.0;
+    }
+    float3 response = restirBrdfResponse(n, v, direction, diffAlb, F0, rough, pbr);
+    if (sample.measure < 0.0) {
+        return max(luminance(response * worldPush.lightRadiance.xyz), 0.0);
+    }
+    // A texture-independent scalar target keeps temporal samples valid without storing material/list
+    // indices. Exact emitted RGB, mask, orientation and occlusion are evaluated by the one selected ray.
+    return max(luminance(response) * EMISSIVE_STRENGTH * sample.measure
+            / max(distance * distance, 0.01), 0.0);
+}
+
+uint64_t restirLightAddress() {
+    return uint64_t(worldPush.breakingPad0) | (uint64_t(worldPush.breakingPad1) << 32);
+}
+
+RestirSample restirFreshLocal(inout uint seed) {
+    RestirSample sample;
+    sample.value = float3(0.0, 0.0, 0.0);
+    sample.measure = 0.0;
+    uint count = worldPush.breakingPad2;
+    uint64_t address = restirLightAddress();
+    if (count == 0u || address == 0u) {
+        return sample;
+    }
+    uint index = min(uint(rndf(seed) * float(count)), count - 1u);
+    EmissiveTriangle triangle = ConstPtr<EmissiveTriangle>(address)[index];
+    float3 p0 = triangle.p0.xyz;
+    float3 p1 = triangle.p1.xyz;
+    float3 p2 = triangle.p2.xyz;
+    float area = 0.5 * length(cross(p1 - p0, p2 - p0));
+    if (!(area > 1.0e-8)) {
+        return sample;
+    }
+    float su = sqrt(rndf(seed));
+    float v = rndf(seed);
+    float b0 = 1.0 - su;
+    float b1 = su * (1.0 - v);
+    float b2 = su * v;
+    sample.value = b0 * p0 + b1 * p1 + b2 * p2;
+    sample.measure = min(area * float(count), 65500.0);
+    return sample;
 }
 
 bool restirPreviousCandidate(int2 pixel, int2 size, float3 receiverNormal,
                              float expectedPreviousDepth,
-                             out float3 dir, out float normalization, out float sampleCount) {
-    dir = float3(0.0, 1.0, 0.0);
+                             out RestirSample sample, out float normalization, out float sampleCount) {
+    sample.value = float3(0.0, 1.0, 0.0);
+    sample.measure = 0.0;
     normalization = 0.0;
     sampleCount = 0.0;
     if (pixel.x < 0 || pixel.y < 0 || pixel.x >= size.x || pixel.y >= size.y) {
@@ -570,12 +680,16 @@ bool restirPreviousCandidate(int2 pixel, int2 size, float3 receiverNormal,
     }
     float4 sampleData = restirLoadPreviousSample(pixel);
     float4 surfaceData = restirLoadPreviousSurface(pixel);
-    float dirLength2 = dot(sampleData.xyz, sampleData.xyz);
+    restirUnpackState(surfaceData.w, normalization, sampleCount);
+    bool celestial = sampleData.w < 0.0;
+    float valueLength2 = dot(sampleData.xyz, sampleData.xyz);
     // Every comparison deliberately rejects NaN as well as uninitialized/overflowed half-float data.
-    if (!(dirLength2 > 0.8 && dirLength2 < 1.2)
-            || !(sampleData.w > 0.0 && sampleData.w <= RESTIR_MAX_W)
+    if ((celestial && !(valueLength2 > 0.8 && valueLength2 < 1.2))
+            || (!celestial && (!(sampleData.w > 0.0 && sampleData.w < 65504.0)
+                    || !(valueLength2 < 1.0e12)))
+            || !(normalization > 0.0 && normalization <= RESTIR_MAX_W)
             || !(surfaceData.z > 0.0 && surfaceData.z < 20000.0)
-            || !(surfaceData.w >= 1.0 && surfaceData.w <= RESTIR_MAX_M)) {
+            || !(sampleCount >= 1.0 && sampleCount <= RESTIR_MAX_M)) {
         return false;
     }
     float3 previousNormal = restirDecodeNormal(surfaceData.xy);
@@ -584,47 +698,65 @@ bool restirPreviousCandidate(int2 pixel, int2 size, float3 receiverNormal,
     }
     // A /time jump or the sun-to-moon handoff changes the emitter proposal itself. Do not drag an old
     // celestial direction across the sky; ordinary frame-to-frame motion remains well inside this cone.
-    float emitterReuseAngle = max(worldPush.lightDir.w * 4.0, 0.025);
-    if (!(dot(normalize(sampleData.xyz), normalize(worldPush.lightDir.xyz))
-            > cos(emitterReuseAngle))) {
-        return false;
+    if (celestial) {
+        float emitterReuseAngle = max(worldPush.lightDir.w * 4.0, 0.025);
+        if (!(dot(normalize(sampleData.xyz), normalize(worldPush.lightDir.xyz))
+                > cos(emitterReuseAngle))) {
+            return false;
+        }
     }
     float depthTolerance = max(0.35, expectedPreviousDepth * 0.035);
     if (!(abs(surfaceData.z - expectedPreviousDepth) <= depthTolerance)) {
         return false;
     }
-    dir = normalize(sampleData.xyz);
-    normalization = sampleData.w;
-    sampleCount = surfaceData.w;
+    // Local points were stored relative to the previous camera. Convert them into this frame's rebased
+    // coordinates. camDelta = currentCamera - previousCamera; camOffset is the current rebased camera.
+    sample.value = celestial
+            ? sampleData.xyz
+            : sampleData.xyz + worldPush.camOffset - worldPush.camDelta;
+    sample.measure = sampleData.w;
     return true;
 }
 
-float3 restirSelectDirect(int2 pixel, int2 size, float3 hitPos, float3 receiverNormal,
-                          float3 motionPrev, float3 v, float3 diffAlb, float3 F0,
-                          float rough, bool pbr, inout uint seed, out float normalization) {
+RestirSample restirSelectDirect(int2 pixel, int2 size, float3 hitPos, float3 receiverNormal,
+                                float3 motionPrev, float3 v, float3 diffAlb, float3 F0,
+                                float rough, bool pbr, bool useHistory,
+                                inout uint seed, out float normalization) {
     RestirReservoir reservoir;
-    reservoir.dir = normalize(worldPush.lightDir.xyz);
+    reservoir.sample.value = normalize(worldPush.lightDir.xyz);
+    reservoir.sample.measure = -1.0;
     reservoir.weightSum = 0.0;
     reservoir.selectedPHat = 0.0;
     reservoir.M = 0.0;
 
     int candidates = clamp(int(round(worldPush.fogControl.w)), 1, 8);
+    bool hasLocal = worldPush.breakingPad2 > 0u && restirLightAddress() != 0u;
     [loop]
     for (int i = 0; i < candidates; ++i) {
-        float3 candidateDir = worldPush.lightDir.xyz;
-        if (worldPush.lightDir.w > 0.0) {
-            candidateDir = sampleSquare(candidateDir, worldPush.lightDir.w, seed);
+        RestirSample candidate;
+        float sourceProbability = 1.0;
+        bool local = hasLocal && rndf(seed) < RESTIR_LOCAL_MIX;
+        if (local) {
+            candidate = restirFreshLocal(seed);
+            sourceProbability = RESTIR_LOCAL_MIX;
+        } else {
+            candidate.value = worldPush.lightDir.xyz;
+            if (worldPush.lightDir.w > 0.0) {
+                candidate.value = sampleSquare(candidate.value, worldPush.lightDir.w, seed);
+            }
+            candidate.measure = -1.0;
+            sourceProbability = hasLocal ? (1.0 - RESTIR_LOCAL_MIX) : 1.0;
         }
-        float3 target = restirDirectTarget(receiverNormal, v, candidateDir, diffAlb, F0, rough, pbr);
-        float pHat = max(luminance(target), 0.0);
-        restirUpdate(reservoir, candidateDir, pHat, pHat, 1.0, seed);
+        float pHat = restirPHat(candidate, hitPos, receiverNormal, v, diffAlb, F0, rough, pbr);
+        restirUpdate(reservoir, candidate, pHat, pHat / sourceProbability, 1.0, seed);
     }
 
     // Reproject this receiver into the previous frame. Dynamic geometry supplies its own displacement;
     // worldPush.camDelta converts current camera-relative coordinates into the previous rebase/camera.
     float3 previousHitCamRel = hitPos - worldPush.camOffset + worldPush.camDelta - motionPrev;
     float4 previousClip = mul(worldPush.prevViewProj, float4(previousHitCamRel, 1.0));
-    bool canReuse = (worldPush.flags & RESTIR_HISTORY_VALID) != 0u && previousClip.w > 0.0;
+    bool canReuse = useHistory && (worldPush.flags & RESTIR_HISTORY_VALID) != 0u
+            && previousClip.w > 0.0;
     int2 previousPixel = int2(-1, -1);
     float expectedPreviousDepth = length(previousHitCamRel);
     if (canReuse) {
@@ -646,18 +778,18 @@ float3 restirSelectDirect(int2 pixel, int2 size, float3 hitPos, float3 receiverN
         else if (rotation == 2u) offset = -offset;
         else if (rotation == 3u) offset = int2(offset.y, -offset.x);
 
-        float3 previousDir;
+        RestirSample previousSample;
         float previousW;
         float previousM;
         if (!restirPreviousCandidate(previousPixel + offset, size, receiverNormal,
-                expectedPreviousDepth, previousDir, previousW, previousM)) {
+                expectedPreviousDepth, previousSample, previousW, previousM)) {
             continue;
         }
-        float3 target = restirDirectTarget(receiverNormal, v, previousDir, diffAlb, F0, rough, pbr);
-        float pHat = max(luminance(target), 0.0);
+        float pHat = restirPHat(previousSample, hitPos, receiverNormal,
+                v, diffAlb, F0, rough, pbr);
         // Combine the previous reservoir as one weighted super-candidate:
         // w = pHat_current(y) * W_previous * M_previous.
-        restirUpdate(reservoir, previousDir, pHat, pHat * previousW * previousM,
+        restirUpdate(reservoir, previousSample, pHat, pHat * previousW * previousM,
                 previousM, seed);
     }
 
@@ -669,10 +801,16 @@ float3 restirSelectDirect(int2 pixel, int2 size, float3 hitPos, float3 receiverN
             ? clamp(reservoir.weightSum / (reservoir.M * reservoir.selectedPHat), 0.0, RESTIR_MAX_W)
             : 0.0;
     float receiverDepth = length(hitPos - worldPush.camOffset);
-    restirStoreCurrent(pixel,
-            float4(reservoir.dir, normalization),
-            float4(restirEncodeNormal(receiverNormal), receiverDepth, reservoir.M));
-    return reservoir.dir;
+    if (useHistory) {
+        float3 storedValue = reservoir.sample.measure > 0.0
+                ? reservoir.sample.value - worldPush.camOffset
+                : reservoir.sample.value;
+        restirStoreCurrent(pixel,
+                float4(storedValue, reservoir.sample.measure),
+                float4(restirEncodeNormal(receiverNormal), receiverDepth,
+                        restirPackState(normalization, reservoir.M)));
+    }
+    return reservoir.sample;
 }
 
 // Sample a GGX visible-normal (VNDF, Heitz 2018) about geometric normal n for view ve, returning the
@@ -742,6 +880,52 @@ float3 visibility(float3 origin, float3 dir, float tmax) {
             CULL_SECONDARY, SBT_SHADOW, SBT_STRIDE_BUCKET, 0u,
             makeRay(origin, RAY_TMIN, dir, tmax), shadowVis);
     return hObj.IsMiss() ? shadowVis.rgb : float3(0.0, 0.0, 0.0);
+}
+
+/**
+ * Trace the one selected local-emitter sample through the regular material closest-hit. The endpoint
+ * must be emissive and near the sampled surface; an earlier non-emissive hit is an occluder. Returning
+ * the payload-derived radiance makes every authored emission texture/mask use exactly the same path as
+ * a normal indirect ray.
+ */
+float3 restirLocalTarget(RestirSample sample, float3 origin, float3 receiverNormal, float3 v,
+                         float3 diffAlb, float3 F0, float rough, bool pbr,
+                         float rayConeWidth, float rayConeSpread) {
+    float3 lightDir;
+    float targetDistance;
+    if (!restirDirection(sample, origin, lightDir, targetDistance)) {
+        return float3(0.0, 0.0, 0.0);
+    }
+    float3 receiverResponse = restirBrdfResponse(
+            receiverNormal, v, lightDir, diffAlb, F0, rough, pbr);
+    if (max(receiverResponse.r, max(receiverResponse.g, receiverResponse.b)) <= 0.0) {
+        return float3(0.0, 0.0, 0.0);
+    }
+
+    Payload receiverPayload = payload;
+    payload.hitT = -1.0;
+    payloadSetTraceState(false, rayConeWidth, rayConeSpread);
+    traceRadianceReordered(CULL_SECONDARY, origin, RAY_TMIN, lightDir, targetDistance + 0.25);
+    float hitDistance = payload.hitT;
+    float emission = payloadEmission();
+    float3 emitted = payload.albedo * emission * EMISSIVE_STRENGTH;
+    float3 emitterNormal = payload.normal;
+    uint emitterMaterial = payloadMaterial();
+    payload = receiverPayload;
+
+    // POM can move the visible texel outward from its macro triangle. Admit that bounded displacement,
+    // but reject an arbitrary closer glowing object so the sampled triangle remains the proposal.
+    float endpointTolerance = max(0.16, targetDistance * 0.002);
+    if (!(hitDistance > 0.0) || abs(hitDistance - targetDistance) > endpointTolerance
+            || emission <= 0.0 || emitterMaterial != MATERIAL_OPAQUE) {
+        return float3(0.0, 0.0, 0.0);
+    }
+    float cosEmitter = max(0.0, dot(emitterNormal, -lightDir));
+    if (cosEmitter <= 0.0) {
+        return float3(0.0, 0.0, 0.0);
+    }
+    return receiverResponse * emitted * cosEmitter * sample.measure
+            / max(targetDistance * targetDistance, 0.01);
 }
 
 float fogDensityAt(float3 position) {
@@ -940,6 +1124,9 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, bool useRestirPr
     // diffuse-sampled continuation rays — those are already covered by the sun NEE, so the tiny disc
     // would be a double-counted firefly. Reset true on every specular/water bounce, false on a diffuse one.
     bool showCelestial = true;
+    // A local emitter reached by the next ordinary BSDF continuation has already been integrated by
+    // this vertex's all-light ReSTIR NEE. Keep directly visible emitters and specular chains intact.
+    bool emissionCoveredByPreviousNee = false;
     for (int bounce = 0; bounce <= maxBounces; bounce++) {
         payload.hitT = -1.0;
         payloadSetTraceState(showCelestial, rayConeWidth, rayConeSpread);
@@ -1010,6 +1197,9 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, bool useRestirPr
         // white by 1 − opacity). Treated as a thin pane, so the transmitted ray continues straight (no
         // refraction bend) — the instance stays double-sided and the normal already faces the incoming ray.
         if (material == MATERIAL_GLASS) {
+            // Local-light NEE does not walk a dielectric chain. Once the BSDF continuation crosses or
+            // reflects at glass, a later emitter hit is a distinct specular-path contribution.
+            emissionCoveredByPreviousNee = false;
             float3 glassTint = payload.albedo;
             float materialIor = max(payloadIor(), 1.0e-3);
             float transmission = clamp(payloadTransmission(), 0.0, 1.0);
@@ -1092,6 +1282,9 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, bool useRestirPr
         // transmission, the new medium is read from this hit's face orientation (payloadWaterEntering),
         // not toggled — see PAYLOAD_WATER_ENTERING. The bounce cap bounds stacked refractions.
         if (material == MATERIAL_WATER) {
+            // As with glass, local-light NEE stops at this dielectric interface, so preserve emitter
+            // radiance reached through the reflected/refracted continuation.
+            emissionCoveredByPreviousNee = false;
             float materialIor = max(payloadIor(), 1.0e-3);
             float transmission = clamp(payloadTransmission(), 0.0, 1.0);
             // The primary-water guide traces another radiance ray through the global payload. Preserve
@@ -1182,48 +1375,63 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, bool useRestirPr
             gv_motionObjDisp = payload.motionPrev; // per-vertex world motion (0 for static terrain/sky)
         }
 
-        // Emissive surfaces (lava, glowstone, torches, ...) add radiance directly, colored by albedo.
-        // Block lights have no NEE, so emission is gathered by hitting emitters during the walk (counted
-        // at every vertex, no double counting). Small emitters are noisy, but temporal accumulation
-        // converges static views.
+        // Emissive surfaces (lava, glowstone, torches, LabPBR/override emission, ...) add radiance when
+        // directly visible or reached through a dielectric chain. An ordinary continuation hit is
+        // suppressed after all-light NEE because ReSTIR already estimated that same direct path.
         float emission = payloadEmission();
-        if (emission > 0.0) {
+        if (emission > 0.0 && !emissionCoveredByPreviousNee) {
             L += throughput * albedo * emission * EMISSIVE_STRENGTH;
         }
+        emissionCoveredByPreviousNee = false;
 
         // NEE: direct light from the dominant celestial body (sun by day, moon by night) — Lambert
         // diffuse + GGX specular, one shadow ray. Jitter the light direction within its square angular
         // extent (worldPush.lightDir.w half-angle) so the shadow ray samples the light's quad — soft penumbrae
         // over accumulation. The same sampled direction drives ndl, the shadow ray, and the specular
         // half-vector.
-        float3 lightDir = worldPush.lightDir.xyz;
+        RestirSample directSample;
+        directSample.value = worldPush.lightDir.xyz;
+        directSample.measure = -1.0;
         float restirNormalization = 1.0;
-        bool restirThisVertex = useRestirPrimary && bounce == 0;
+        bool restirThisVertex = (worldPush.flags & RESTIR_ENABLED) != 0u;
+        bool restirHistoryVertex = useRestirPrimary && bounce == 0;
         if (restirThisVertex) {
-            lightDir = restirSelectDirect(pixel, imageSize, hitPos, n, payload.motionPrev,
-                    v, diffAlb, F0, rough, pbr, seed, restirNormalization);
+            directSample = restirSelectDirect(pixel, imageSize, hitPos, n, payload.motionPrev,
+                    v, diffAlb, F0, rough, pbr, restirHistoryVertex, seed, restirNormalization);
         } else if (worldPush.lightDir.w > 0.0) {
-            lightDir = sampleSquare(lightDir, worldPush.lightDir.w, seed);
+            directSample.value = sampleSquare(directSample.value, worldPush.lightDir.w, seed);
         }
-        float3 directTarget = restirDirectTarget(n, v, lightDir, diffAlb, F0, rough, pbr);
-        if (max(directTarget.r, max(directTarget.g, directTarget.b)) > 0.0
-                && restirNormalization > 0.0) {
+        float3 lightDir;
+        float lightDistance;
+        bool validDirectSample = restirDirection(directSample, shadowP, lightDir, lightDistance);
+        if (validDirectSample && restirNormalization > 0.0) {
             // The same stochastic light sample used by NEE is traced through the local height field.
             // Over path accumulation this produces the relief penumbra without an artistic strength.
             float heightVis = traceReliefVisibility(lightDir, hitCameraDistance);
-            float3 vis = heightVis > 0.001
-                    ? visibility(shadowP, lightDir, 10000.0) * heightVis
-                    : float3(0.0, 0.0, 0.0);
-            // Underwater receiver whose shadow ray crossed a water surface: scale the direct light by
-            // the wave-refraction caustic at the exit point. Focusing scales the incident irradiance,
-            // so it applies to the whole NEE term (diffuse + specular).
-            if (inWater && waterWaves && shadowVis.a > 0.0) {
-                vis *= waterCaustic(shadowP + lightDir * shadowVis.a, lightDir, shadowVis.a);
-            }
-            if (max(vis.r, max(vis.g, vis.b)) > 0.0) {
-                L += throughput * directTarget * vis * restirNormalization;
+            if (heightVis > 0.001) {
+                if (directSample.measure > 0.0) {
+                    float3 localTarget = restirLocalTarget(directSample, shadowP, n, v,
+                            diffAlb, F0, rough, pbr, rayConeWidth, rayConeSpread);
+                    L += throughput * localTarget * (heightVis * restirNormalization);
+                } else {
+                    float3 directTarget = restirCelestialTarget(
+                            n, v, lightDir, diffAlb, F0, rough, pbr);
+                    float3 vis = visibility(shadowP, lightDir, 10000.0) * heightVis;
+                    // Underwater receiver whose shadow ray crossed a water surface: scale the direct
+                    // celestial irradiance by wave-refraction focusing at the exit point.
+                    if (inWater && waterWaves && shadowVis.a > 0.0) {
+                        vis *= waterCaustic(shadowP + lightDir * shadowVis.a, lightDir, shadowVis.a);
+                    }
+                    if (max(vis.r, max(vis.g, vis.b)) > 0.0) {
+                        L += throughput * directTarget * vis * restirNormalization;
+                    }
+                }
             }
         }
+
+        // The all-light proposal mixture integrates every registered local emitter, irrespective of
+        // whether this frame's selected representative happened to be celestial or local.
+        emissionCoveredByPreviousNee = restirThisVertex && worldPush.breakingPad2 > 0u;
 
         // Thin-surface SSS transmission. Light entering from the back face scatters through toward the
         // viewer via a forward-biased HG phase (leaves/grass backlit by the sun glow when you look

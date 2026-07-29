@@ -14,6 +14,7 @@ import net.minecraft.client.Minecraft;
 import org.lwjgl.system.MemoryUtil;
 import org.lwjgl.vulkan.VK10;
 
+import java.nio.ByteBuffer;
 import java.util.AbstractList;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -262,6 +263,44 @@ public final class RtDistantHorizonsTerrain {
     public long tableAddress() {
         Proxy proxy = current;
         return proxy == null ? 0L : proxy.table.deviceAddress;
+    }
+
+    public long emissiveRevision() {
+        Proxy proxy = current;
+        return proxy == null ? 0L : proxy.revision;
+    }
+
+    /** Append emissive DH/Voxy proxy triangles using the same 48-byte format as real terrain. */
+    public int writeEmissiveTriangles(ByteBuffer dst, int firstEntry, int maxEntries,
+                                      int rebaseX, int rebaseY, int rebaseZ) {
+        Proxy proxy = current;
+        if (proxy == null) {
+            return firstEntry;
+        }
+        int count = firstEntry;
+        for (GeomEntry entry : proxy.entries) {
+            RtSectionTable.SectionGeom geom = entry.geom;
+            float[] triangles = geom.emissiveTriangles;
+            float tx = geom.sx - rebaseX;
+            float ty = geom.sy - rebaseY;
+            float tz = geom.sz - rebaseZ;
+            for (int base = 0; base + 8 < triangles.length && count < maxEntries; base += 9) {
+                int out = count * 48;
+                for (int corner = 0; corner < 3; corner++) {
+                    int source = base + corner * 3;
+                    int target = out + corner * 16;
+                    dst.putFloat(target, triangles[source] + tx);
+                    dst.putFloat(target + 4, triangles[source + 1] + ty);
+                    dst.putFloat(target + 8, triangles[source + 2] + tz);
+                    dst.putFloat(target + 12, 0.0f);
+                }
+                count++;
+            }
+            if (count >= maxEntries) {
+                break;
+            }
+        }
+        return count;
     }
 
     /** Raster DH fills only the still-unbuilt horizon during the first progressive proxy stream. */
@@ -541,7 +580,9 @@ public final class RtDistantHorizonsTerrain {
         int anyHitTris = Math.addExact(Math.addExact(solidTris, emissiveTris), glassTris);
         return new PackedSection(packed.positions, packed.indices, packed.uvs, packed.prims,
                 new int[]{0, anyHitTris, 0, waterTris},
-                new int[]{0, 0, anyHitTris, anyHitTris});
+                new int[]{0, 0, anyHitTris, anyHitTris},
+                RtTerrainMesher.extractEmissiveTriangles(
+                        packed.positions, packed.indices, packed.prims, materials));
     }
 
     private static QuadCounts countDhQuads(byte[] bytes, boolean transparentPass, int maxLocal) {
@@ -938,7 +979,8 @@ public final class RtDistantHorizonsTerrain {
             PlannedBatch item = done.item;
             RtSectionTable.SectionGeom geom = new RtSectionTable.SectionGeom(item.batchKey, prepared.uvs(),
                     prepared.material(), prepared.blas().accel, prepared.triBase(),
-                    prepared.triangleCount(), prepared.sx(), prepared.sy(), prepared.sz());
+                    prepared.triangleCount(), prepared.sx(), prepared.sy(), prepared.sz(),
+                    prepared.emissiveTriangles());
             GeomEntry entry = new GeomEntry(item.batchKey, item.sourceKey, item.sourceVersion,
                     item.originX, item.originZ, item.sourceWidth, item.dataPointWidth, geom);
             session.workingEntries.put(item.batchKey, entry);
