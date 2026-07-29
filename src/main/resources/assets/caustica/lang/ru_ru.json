@@ -1,4 +1,11 @@
 {
+	"caustica.options.rt.restir": "ReSTIR DI",
+	"caustica.options.rt.restir.tooltip": "Переиспользует сэмплы прямого света между кадрами и стабилизирует мягкие трассируемые тени при одном луче видимости.",
+	"caustica.options.rt.restirCandidates": "Кандидаты ReSTIR",
+	"caustica.options.rt.restirCandidates.tooltip": "Количество новых кандидатов света для основной поверхности. Большее значение улучшает блики и полутени без дополнительных теневых лучей.",
+	"caustica.options.rt.restirSpatial": "Пространственный ReSTIR",
+	"caustica.options.rt.restirSpatial.tooltip": "Переиспользует совместимые сэмплы соседних пикселей. Проверка глубины и нормали отбрасывает другие поверхности и раскрытые области.",
+
 	"caustica.options.voxy.header": "Лоды Voxy",
 	"caustica.options.voxy.enabled": "Лоды Voxy",
 	"caustica.options.voxy.enabled.tooltip": "Включает дальний ландшафт Voxy в трассировщике Caustica. Применяется сразу.",

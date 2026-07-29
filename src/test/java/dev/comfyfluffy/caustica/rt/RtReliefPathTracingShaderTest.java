@@ -125,6 +125,25 @@ final class RtReliefPathTracingShaderTest {
     }
 
     @Test
+    void restirUsesValidatedPingPongReservoirsAndOneSelectedShadowRay() throws IOException {
+        String raygen = shader("world.rgen.slang");
+        String composite = Files.readString(Path.of("src", "main", "java", "dev", "comfyfluffy",
+                "caustica", "rt", "RtComposite.java"));
+
+        assertTrue(raygen.contains("RESTIR_HISTORY_VALID"));
+        assertTrue(raygen.contains("restirLoadPreviousSample"));
+        assertTrue(raygen.contains("dot(previousNormal, receiverNormal) > 0.88"));
+        assertTrue(raygen.contains("abs(surfaceData.z - expectedPreviousDepth) <= depthTolerance"));
+        assertTrue(raygen.contains("pHat * previousW * previousM"));
+        assertTrue(raygen.contains("restirNormalization"));
+        assertTrue(raygen.contains("visibility(shadowP, lightDir, 10000.0) * heightVis"));
+        assertFalse(raygen.contains("visibility(shadowP, candidateDir"));
+        assertTrue(composite.contains("private static final int GUIDE_COUNT = 10"));
+        assertTrue(composite.contains("worldPipeline.setExtraStorageImage(9, restirB1.view)"));
+        assertTrue(composite.contains("flags |= 0b1000000000"));
+    }
+
+    @Test
     void animatedEnchantmentGlintDoesNotBecomeDuplicateOpaqueRtGeometry() throws IOException {
         String collector = Files.readString(Path.of("src", "main", "java", "dev", "comfyfluffy",
                 "caustica", "rt", "entity", "RtEntityCollector.java"));

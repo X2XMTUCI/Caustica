@@ -33,6 +33,12 @@ import world_common;
 [[vk::binding(6, 0)]] [format("rg16f")]   RWTexture2D<float2> gMotion;     // screen-space motion (render px)
 [[vk::binding(7, 0)]] [format("rgba16f")] RWTexture2D<float4> gSpecAlbedo; // specular albedo (0 — diffuse-only)
 [[vk::binding(8, 0)]] [format("rg16f")]   RWTexture2D<float2> gSpecMotion; // reflection MVs for RR
+// ReSTIR DI ping-pong history. sample = selected direction.xyz + RIS normalization;
+// surface = oct-encoded normal.xy + camera distance + effective sample count.
+[[vk::binding(9, 0)]]  [format("rgba16f")] RWTexture2D<float4> restirA0;
+[[vk::binding(10, 0)]] [format("rgba16f")] RWTexture2D<float4> restirA1;
+[[vk::binding(11, 0)]] [format("rgba16f")] RWTexture2D<float4> restirB0;
+[[vk::binding(12, 0)]] [format("rgba16f")] RWTexture2D<float4> restirB1;
 // Shared canonical LabPBR height pages. Raygen samples these for visibility along the actual direction
 // selected by each path vertex, so emissive and indirect paths receive the same relief masking as NEE.
 [[vk::binding(2, 1)]] Sampler2D materialNormalAoTex[];
@@ -460,6 +466,215 @@ float3 sampleSquare(float3 axis, float halfAngle, inout uint s) {
     return normalize(axis + u * right + v * up);
 }
 
+// ---- ReSTIR DI for the dominant celestial emitter -----------------------------------------------
+// The scene currently exposes the sun/moon square as its analytic NEE emitter. ReSTIR chooses among
+// several directions on that square, then reuses the selected direction from compatible receivers in
+// the previous frame. Only the final selected sample fires a visibility ray; all candidate target
+// evaluations are BRDF-only. Indirect vertices retain ordinary one-sample NEE because they have no
+// stable screen-space correspondence.
+static const uint RESTIR_ENABLED = 0x80u;
+static const uint RESTIR_SPATIAL = 0x100u;
+static const uint RESTIR_HISTORY_VALID = 0x200u;
+static const float RESTIR_MAX_M = 32.0;
+static const float RESTIR_MAX_W = 64.0;
+
+struct RestirReservoir {
+    float3 dir;
+    float weightSum;
+    float selectedPHat;
+    float M;
+};
+
+float2 restirEncodeNormal(float3 value) {
+    float3 n = normalize(value);
+    n /= abs(n.x) + abs(n.y) + abs(n.z);
+    float2 oct = n.xy;
+    if (n.z < 0.0) {
+        oct = (1.0 - abs(oct.yx)) * float2(oct.x >= 0.0 ? 1.0 : -1.0,
+                oct.y >= 0.0 ? 1.0 : -1.0);
+    }
+    return oct * 0.5 + 0.5;
+}
+
+float3 restirDecodeNormal(float2 encoded) {
+    float2 oct = encoded * 2.0 - 1.0;
+    float3 n = float3(oct, 1.0 - abs(oct.x) - abs(oct.y));
+    if (n.z < 0.0) {
+        n.xy = (1.0 - abs(n.yx)) * float2(n.x >= 0.0 ? 1.0 : -1.0,
+                n.y >= 0.0 ? 1.0 : -1.0);
+    }
+    return normalize(n);
+}
+
+float4 restirLoadPreviousSample(int2 pixel) {
+    // Even frames write A and read B; odd frames write B and read A.
+    return (worldPush.frameIndex & 1u) == 0u ? restirB0[pixel] : restirA0[pixel];
+}
+
+float4 restirLoadPreviousSurface(int2 pixel) {
+    return (worldPush.frameIndex & 1u) == 0u ? restirB1[pixel] : restirA1[pixel];
+}
+
+void restirStoreCurrent(int2 pixel, float4 sampleData, float4 surfaceData) {
+    if ((worldPush.frameIndex & 1u) == 0u) {
+        restirA0[pixel] = sampleData;
+        restirA1[pixel] = surfaceData;
+    } else {
+        restirB0[pixel] = sampleData;
+        restirB1[pixel] = surfaceData;
+    }
+}
+
+void restirUpdate(inout RestirReservoir reservoir, float3 dir, float pHat,
+                  float candidateWeight, float candidateM, inout uint seed) {
+    if (!(candidateWeight > 0.0) || !(candidateM > 0.0)) {
+        return;
+    }
+    float newWeightSum = reservoir.weightSum + candidateWeight;
+    if (rndf(seed) * newWeightSum < candidateWeight) {
+        reservoir.dir = dir;
+        reservoir.selectedPHat = pHat;
+    }
+    reservoir.weightSum = newWeightSum;
+    reservoir.M += candidateM;
+}
+
+float3 restirDirectTarget(float3 n, float3 v, float3 lightDir, float3 diffAlb,
+                          float3 F0, float rough, bool pbr) {
+    float ndl = max(0.0, dot(n, lightDir));
+    if (ndl <= 0.0) {
+        return float3(0.0, 0.0, 0.0);
+    }
+    float3 brdf = diffAlb * INV_PI;
+    if (pbr) {
+        float3 h = normalize(lightDir + v);
+        float ndh = max(0.0, dot(n, h));
+        float ndv = max(1.0e-4, dot(n, v));
+        float vdh = max(0.0, dot(v, h));
+        float D = ggxD(ndh, rough);
+        float G = ggxG1(ndv, rough) * ggxG1(ndl, rough);
+        float3 F = fresnelSchlick(vdh, F0);
+        brdf += (D * G) * F / (4.0 * ndv * ndl);
+    }
+    return brdf * worldPush.lightRadiance.xyz * ndl;
+}
+
+bool restirPreviousCandidate(int2 pixel, int2 size, float3 receiverNormal,
+                             float expectedPreviousDepth,
+                             out float3 dir, out float normalization, out float sampleCount) {
+    dir = float3(0.0, 1.0, 0.0);
+    normalization = 0.0;
+    sampleCount = 0.0;
+    if (pixel.x < 0 || pixel.y < 0 || pixel.x >= size.x || pixel.y >= size.y) {
+        return false;
+    }
+    float4 sampleData = restirLoadPreviousSample(pixel);
+    float4 surfaceData = restirLoadPreviousSurface(pixel);
+    float dirLength2 = dot(sampleData.xyz, sampleData.xyz);
+    // Every comparison deliberately rejects NaN as well as uninitialized/overflowed half-float data.
+    if (!(dirLength2 > 0.8 && dirLength2 < 1.2)
+            || !(sampleData.w > 0.0 && sampleData.w <= RESTIR_MAX_W)
+            || !(surfaceData.z > 0.0 && surfaceData.z < 20000.0)
+            || !(surfaceData.w >= 1.0 && surfaceData.w <= RESTIR_MAX_M)) {
+        return false;
+    }
+    float3 previousNormal = restirDecodeNormal(surfaceData.xy);
+    if (!(dot(previousNormal, receiverNormal) > 0.88)) {
+        return false;
+    }
+    // A /time jump or the sun-to-moon handoff changes the emitter proposal itself. Do not drag an old
+    // celestial direction across the sky; ordinary frame-to-frame motion remains well inside this cone.
+    float emitterReuseAngle = max(worldPush.lightDir.w * 4.0, 0.025);
+    if (!(dot(normalize(sampleData.xyz), normalize(worldPush.lightDir.xyz))
+            > cos(emitterReuseAngle))) {
+        return false;
+    }
+    float depthTolerance = max(0.35, expectedPreviousDepth * 0.035);
+    if (!(abs(surfaceData.z - expectedPreviousDepth) <= depthTolerance)) {
+        return false;
+    }
+    dir = normalize(sampleData.xyz);
+    normalization = sampleData.w;
+    sampleCount = surfaceData.w;
+    return true;
+}
+
+float3 restirSelectDirect(int2 pixel, int2 size, float3 hitPos, float3 receiverNormal,
+                          float3 motionPrev, float3 v, float3 diffAlb, float3 F0,
+                          float rough, bool pbr, inout uint seed, out float normalization) {
+    RestirReservoir reservoir;
+    reservoir.dir = normalize(worldPush.lightDir.xyz);
+    reservoir.weightSum = 0.0;
+    reservoir.selectedPHat = 0.0;
+    reservoir.M = 0.0;
+
+    int candidates = clamp(int(round(worldPush.fogControl.w)), 1, 8);
+    [loop]
+    for (int i = 0; i < candidates; ++i) {
+        float3 candidateDir = worldPush.lightDir.xyz;
+        if (worldPush.lightDir.w > 0.0) {
+            candidateDir = sampleSquare(candidateDir, worldPush.lightDir.w, seed);
+        }
+        float3 target = restirDirectTarget(receiverNormal, v, candidateDir, diffAlb, F0, rough, pbr);
+        float pHat = max(luminance(target), 0.0);
+        restirUpdate(reservoir, candidateDir, pHat, pHat, 1.0, seed);
+    }
+
+    // Reproject this receiver into the previous frame. Dynamic geometry supplies its own displacement;
+    // worldPush.camDelta converts current camera-relative coordinates into the previous rebase/camera.
+    float3 previousHitCamRel = hitPos - worldPush.camOffset + worldPush.camDelta - motionPrev;
+    float4 previousClip = mul(worldPush.prevViewProj, float4(previousHitCamRel, 1.0));
+    bool canReuse = (worldPush.flags & RESTIR_HISTORY_VALID) != 0u && previousClip.w > 0.0;
+    int2 previousPixel = int2(-1, -1);
+    float expectedPreviousDepth = length(previousHitCamRel);
+    if (canReuse) {
+        float2 previousUv = previousClip.xy / previousClip.w * 0.5 + 0.5;
+        previousPixel = int2(floor(previousUv * float2(size)));
+    }
+
+    int reuseCount = (worldPush.flags & RESTIR_SPATIAL) != 0u ? 5 : 1;
+    [loop]
+    for (int reuse = 0; reuse < reuseCount && canReuse; ++reuse) {
+        int2 offset = int2(0, 0);
+        if (reuse == 1) offset = int2(4, 0);
+        else if (reuse == 2) offset = int2(-4, 0);
+        else if (reuse == 3) offset = int2(0, 4);
+        else if (reuse == 4) offset = int2(0, -4);
+        // Rotate the cross per pixel/frame to avoid a persistent axis-aligned reuse pattern.
+        uint rotation = (seed >> 8) & 3u;
+        if (rotation == 1u) offset = int2(-offset.y, offset.x);
+        else if (rotation == 2u) offset = -offset;
+        else if (rotation == 3u) offset = int2(offset.y, -offset.x);
+
+        float3 previousDir;
+        float previousW;
+        float previousM;
+        if (!restirPreviousCandidate(previousPixel + offset, size, receiverNormal,
+                expectedPreviousDepth, previousDir, previousW, previousM)) {
+            continue;
+        }
+        float3 target = restirDirectTarget(receiverNormal, v, previousDir, diffAlb, F0, rough, pbr);
+        float pHat = max(luminance(target), 0.0);
+        // Combine the previous reservoir as one weighted super-candidate:
+        // w = pHat_current(y) * W_previous * M_previous.
+        restirUpdate(reservoir, previousDir, pHat, pHat * previousW * previousM,
+                previousM, seed);
+    }
+
+    if (reservoir.M > RESTIR_MAX_M) {
+        reservoir.weightSum *= RESTIR_MAX_M / reservoir.M;
+        reservoir.M = RESTIR_MAX_M;
+    }
+    normalization = reservoir.selectedPHat > 1.0e-8 && reservoir.M > 0.0
+            ? clamp(reservoir.weightSum / (reservoir.M * reservoir.selectedPHat), 0.0, RESTIR_MAX_W)
+            : 0.0;
+    float receiverDepth = length(hitPos - worldPush.camOffset);
+    restirStoreCurrent(pixel,
+            float4(reservoir.dir, normalization),
+            float4(restirEncodeNormal(receiverNormal), receiverDepth, reservoir.M));
+    return reservoir.dir;
+}
+
 // Sample a GGX visible-normal (VNDF, Heitz 2018) about geometric normal n for view ve, returning the
 // sampled microfacet normal (half-vector) in world space. alpha = rough^2. Paired with the separable
 // Smith term, the importance-sampling weight reduces to F * G1(NdotL) (applied by the caller).
@@ -704,7 +919,8 @@ void refractedGuideHit(float3 surfacePos, float3 incidentDir, float3 surfaceNorm
 }
 
 // One Monte Carlo path from (ro, rd). Returns accumulated radiance along the path.
-float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed) {
+float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, bool useRestirPrimary,
+                 int2 pixel, int2 imageSize, inout uint seed) {
     float3 L = float3(0.0, 0.0, 0.0);
     float3 throughput = float3(1.0, 1.0, 1.0);
     float rayConeWidth = 0.0;
@@ -981,12 +1197,17 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
         // over accumulation. The same sampled direction drives ndl, the shadow ray, and the specular
         // half-vector.
         float3 lightDir = worldPush.lightDir.xyz;
-        float lightHalfAngle = worldPush.lightDir.w;
-        if (lightHalfAngle > 0.0) {
-            lightDir = sampleSquare(lightDir, lightHalfAngle, seed);
+        float restirNormalization = 1.0;
+        bool restirThisVertex = useRestirPrimary && bounce == 0;
+        if (restirThisVertex) {
+            lightDir = restirSelectDirect(pixel, imageSize, hitPos, n, payload.motionPrev,
+                    v, diffAlb, F0, rough, pbr, seed, restirNormalization);
+        } else if (worldPush.lightDir.w > 0.0) {
+            lightDir = sampleSquare(lightDir, worldPush.lightDir.w, seed);
         }
-        float ndl = max(0.0, dot(n, lightDir));
-        if (ndl > 0.0) {
+        float3 directTarget = restirDirectTarget(n, v, lightDir, diffAlb, F0, rough, pbr);
+        if (max(directTarget.r, max(directTarget.g, directTarget.b)) > 0.0
+                && restirNormalization > 0.0) {
             // The same stochastic light sample used by NEE is traced through the local height field.
             // Over path accumulation this produces the relief penumbra without an artistic strength.
             float heightVis = traceReliefVisibility(lightDir, hitCameraDistance);
@@ -1000,18 +1221,7 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
                 vis *= waterCaustic(shadowP + lightDir * shadowVis.a, lightDir, shadowVis.a);
             }
             if (max(vis.r, max(vis.g, vis.b)) > 0.0) {
-                float3 brdf = diffAlb * INV_PI; // Lambertian diffuse (f = albedo/PI)
-                if (pbr) {
-                    float3 h = normalize(lightDir + v);
-                    float ndh = max(0.0, dot(n, h));
-                    float ndv = max(1.0e-4, dot(n, v));
-                    float vdh = max(0.0, dot(v, h));
-                    float D = ggxD(ndh, rough);
-                    float G = ggxG1(ndv, rough) * ggxG1(ndl, rough); // separable Smith masking
-                    float3 F = fresnelSchlick(vdh, F0);
-                    brdf += (D * G) * F / (4.0 * ndv * ndl); // Cook–Torrance specular
-                }
-                L += throughput * brdf * worldPush.lightRadiance.xyz * ndl * vis;
+                L += throughput * directTarget * vis * restirNormalization;
             }
         }
 
@@ -1021,18 +1231,27 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, inout uint seed)
         // self-occlusion. cosT = dot(lightDir, rd): rd tracks the ray toward the sun when the sun is
         // behind the slab, giving cosT ≈ 1 → forward-scatter peak.
         if (sss > 0.0 && bounce <= MAX_SSS_BOUNCE) {
-            float backNdl = max(0.0, dot(-n, lightDir));
+            // ReSTIR's selected direction is distributed for the front BRDF. SSS uses a separate
+            // uniform light sample so its transmission estimate remains unbiased.
+            float3 sssLightDir = lightDir;
+            if (restirThisVertex) {
+                sssLightDir = worldPush.lightDir.xyz;
+                if (worldPush.lightDir.w > 0.0) {
+                    sssLightDir = sampleSquare(sssLightDir, worldPush.lightDir.w, seed);
+                }
+            }
+            float backNdl = max(0.0, dot(-n, sssLightDir));
             if (backNdl > 0.0) {
                 float3 visB = visibility(shadowSurfacePos - rayOriginNormal * SURF_BIAS,
-                        lightDir, 10000.0);
+                        sssLightDir, 10000.0);
                 // Same caustic as the front-face NEE — underwater kelp/seagrass transmission should
                 // flicker with the same light bands as the floor around it.
                 if (inWater && waterWaves && shadowVis.a > 0.0) {
-                    visB *= waterCaustic(shadowSurfacePos + lightDir * shadowVis.a,
-                            lightDir, shadowVis.a);
+                    visB *= waterCaustic(shadowSurfacePos + sssLightDir * shadowVis.a,
+                            sssLightDir, shadowVis.a);
                 }
                 if (max(visB.r, max(visB.g, visB.b)) > 0.0) {
-                    float cosT = dot(lightDir, rd);
+                    float cosT = dot(sssLightDir, rd);
                     L += throughput * diffAlb * sss * SSS_STRENGTH * hg(cosT, SSS_G) * backNdl * worldPush.lightRadiance.xyz * visB;
                 }
             }
@@ -1116,11 +1335,21 @@ void main() {
 
     uint seed = (uint(pix.x) * 1973u + uint(pix.y) * 9277u + 26699u) ^ (worldPush.frameIndex * 2654435761u);
 
+    bool restirEnabled = (worldPush.flags & RESTIR_ENABLED) != 0u;
+    // Invalidate the current slot first. Sky/water/glass/particle primary hits must not leave a stale
+    // opaque-surface reservoir behind for a future reprojection.
+    if (restirEnabled) {
+        restirStoreCurrent(pix, float4(0.0, 0.0, 0.0, 0.0), float4(0.0, 0.0, 0.0, 0.0));
+    }
+
     uint spp = max(worldPush.spp, 1u);
     float3 frameRadiance = float3(0.0, 0.0, 0.0);
     for (uint s = 0u; s < spp; s++) {
         seed = pcg(seed); // decorrelate per-sample paths (shared camera ray, no AA jitter yet)
-        frameRadiance += tracePath(origin, dir, rayConeSpread, seed);
+        // Update one reservoir per pixel/frame. Additional SPP paths stay independent conventional
+        // estimators, so they cannot overwrite or over-count the temporal reservoir.
+        frameRadiance += tracePath(origin, dir, rayConeSpread, restirEnabled && s == 0u,
+                pix, int2(DispatchRaysDimensions().xy), seed);
     }
     frameRadiance /= float(spp);
 

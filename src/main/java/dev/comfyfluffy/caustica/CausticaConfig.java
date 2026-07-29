@@ -572,6 +572,18 @@ public final class CausticaConfig {
             }
         }
 
+        public static final class Restir {
+            public static final BooleanSetting ENABLED =
+                    bool("caustica.rt.restir", "restir.enabled", true);
+            public static final IntSetting CANDIDATES =
+                    clampedInt("caustica.rt.restirCandidates", "restir.candidates", 4, 1, 8);
+            public static final BooleanSetting SPATIAL_REUSE =
+                    bool("caustica.rt.restirSpatial", "restir.spatial-reuse", true);
+
+            private Restir() {
+            }
+        }
+
         public static final class Fog {
             public static final BooleanSetting ENABLED =
                     bool("caustica.rt.volumetricFog", "volumetric-fog.enabled", true);

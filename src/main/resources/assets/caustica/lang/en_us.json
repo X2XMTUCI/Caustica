@@ -1,4 +1,11 @@
 {
+	"caustica.options.rt.restir": "ReSTIR DI",
+	"caustica.options.rt.restir.tooltip": "Reuse direct-light samples across frames to stabilize soft path-traced shadows with one traced visibility ray.",
+	"caustica.options.rt.restirCandidates": "ReSTIR Candidates",
+	"caustica.options.rt.restirCandidates.tooltip": "Number of new light candidates considered per primary surface. More candidates improve specular and penumbra sampling without adding shadow rays.",
+	"caustica.options.rt.restirSpatial": "ReSTIR Spatial Reuse",
+	"caustica.options.rt.restirSpatial.tooltip": "Reuse compatible samples from nearby reprojected pixels. Depth and normal validation rejects disocclusions and different surfaces.",
+
 	"caustica.options.voxy.header": "Voxy LODs",
 	"caustica.options.voxy.enabled": "Voxy LODs",
 	"caustica.options.voxy.enabled.tooltip": "Enable Voxy distant terrain in the Caustica path tracer. This takes effect immediately.",

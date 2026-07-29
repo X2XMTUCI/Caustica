@@ -42,6 +42,9 @@ public final class RtVideoOptions {
             spp(),
             maxBounces(),
             sunSize(),
+            restirEnabled(),
+            restirCandidates(),
+            restirSpatialReuse(),
             entities(),
             particles(),
             waterWaves(),
@@ -162,6 +165,26 @@ public final class RtVideoOptions {
             new OptionInstance.IntRange(1, 50),
             initialTenths,
             tenths -> setting.set(tenths / 10.0f));
+    }
+
+    private static OptionInstance<Boolean> restirEnabled() {
+        return bool("caustica.options.rt.restir", CausticaConfig.Rt.Restir.ENABLED);
+    }
+
+    private static OptionInstance<Integer> restirCandidates() {
+        IntSetting setting = CausticaConfig.Rt.Restir.CANDIDATES;
+        return new OptionInstance<>(
+            "caustica.options.rt.restirCandidates",
+            OptionInstance.cachedConstantTooltip(
+                    Component.translatable("caustica.options.rt.restirCandidates.tooltip")),
+            (caption, value) -> Options.genericValueLabel(caption, value),
+            new OptionInstance.IntRange(1, 8),
+            Math.clamp(setting.value(), 1, 8),
+            setting::set);
+    }
+
+    private static OptionInstance<Boolean> restirSpatialReuse() {
+        return bool("caustica.options.rt.restirSpatial", CausticaConfig.Rt.Restir.SPATIAL_REUSE);
     }
 
     private static OptionInstance<Boolean> entities() {

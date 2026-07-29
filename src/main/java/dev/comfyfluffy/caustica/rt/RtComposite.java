@@ -100,7 +100,7 @@ public final class RtComposite {
     // Real inline push constants (fast constant-bank reads), separate from the WorldPush BDA ring above.
     // Hot addresses/frameIndex and raygen's debugView avoid unnecessary global-memory dereferences;
     // WorldPushConstantsData is generated from the same Slang module and owns this second ABI as well.
-    private static final int GUIDE_COUNT = 6; // RR guide buffers bound at world-pipeline bindings 3..8
+    private static final int GUIDE_COUNT = 10; // six RR guides + four ReSTIR reservoir images, bindings 3..12
     // Frames a retired per-frame TLAS must outlive before it's freed (> frames-in-flight); matches
     // RtTerrain's deferred-free horizon. The frame TLAS is built + traced this frame, then freed once
     // the composite frame counter has advanced this far past it (so no in-flight frame still reads it).
@@ -236,6 +236,15 @@ public final class RtComposite {
     private RtImage gMotion;
     private RtImage gSpecAlbedo;
     private RtImage gSpecMotion;
+    // ReSTIR DI history: two RGBA16F images per ping-pong frame. reservoir0 stores selected light
+    // direction + RIS normalization; reservoir1 stores encoded receiver normal, depth and sample count.
+    private RtImage restirA0;
+    private RtImage restirA1;
+    private RtImage restirB0;
+    private RtImage restirB1;
+    private boolean restirHistoryValid;
+    private boolean restirWasEnabled;
+    private Object restirLevel;
     // Display-res RT image the display mapper reads: DLSS-RR writes it (render -> display denoise+upscale), or a
     // linear blit of `output` fills it when RR is off/unavailable (the no-RR reference / fallback).
     private RtImage rrOutput;
@@ -623,6 +632,7 @@ public final class RtComposite {
     public void onResourceReloadStart() {
         reloadRebindRequested = true;
         materialBindingsReady = false;
+        restirHistoryValid = false;
         setCelestialUvAtlas(0L);
         RtEntities.INSTANCE.onResourceReload();
         RtContext ctx = RtContext.currentOrNull();
@@ -648,6 +658,10 @@ public final class RtComposite {
         worldPipeline.setExtraStorageImage(3, gMotion.view);
         worldPipeline.setExtraStorageImage(4, gSpecAlbedo.view);
         worldPipeline.setExtraStorageImage(5, gSpecMotion.view);
+        worldPipeline.setExtraStorageImage(6, restirA0.view);
+        worldPipeline.setExtraStorageImage(7, restirA1.view);
+        worldPipeline.setExtraStorageImage(8, restirB0.view);
+        worldPipeline.setExtraStorageImage(9, restirB1.view);
     }
 
     private void destroyGuideImages() {
@@ -675,6 +689,24 @@ public final class RtComposite {
             gSpecMotion.destroy();
             gSpecMotion = null;
         }
+        if (restirA0 != null) {
+            restirA0.destroy();
+            restirA0 = null;
+        }
+        if (restirA1 != null) {
+            restirA1.destroy();
+            restirA1 = null;
+        }
+        if (restirB0 != null) {
+            restirB0.destroy();
+            restirB0 = null;
+        }
+        if (restirB1 != null) {
+            restirB1.destroy();
+            restirB1 = null;
+        }
+        restirHistoryValid = false;
+        restirLevel = null;
         if (rrOutput != null) {
             rrOutput.destroy();
             rrOutput = null;
@@ -728,6 +760,15 @@ public final class RtComposite {
         gMotion = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16_SFLOAT, "guide motion " + renderW + "x" + renderH);
         gSpecAlbedo = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "guide specular albedo " + renderW + "x" + renderH);
         gSpecMotion = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16_SFLOAT, "guide specular motion " + renderW + "x" + renderH);
+        restirA0 = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
+                "ReSTIR reservoir A sample " + renderW + "x" + renderH);
+        restirA1 = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
+                "ReSTIR reservoir A surface " + renderW + "x" + renderH);
+        restirB0 = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
+                "ReSTIR reservoir B sample " + renderW + "x" + renderH);
+        restirB1 = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
+                "ReSTIR reservoir B surface " + renderW + "x" + renderH);
+        restirHistoryValid = false;
         // Display-res RT image the display mapper reads. Always present (DLSS-RR target, or blit-upscale fallback).
         rrOutput = ctx.createStorageImage(width, height, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "DLSS-RR output " + width + "x" + height);
         exposure.ensureResources(ctx);
@@ -801,8 +842,14 @@ public final class RtComposite {
             frameInvViewProj.set(frameProjection).mul(frameViewRotation).invert();
             // flags: PBR BRDF (bit 1, always on) + camera-in-water (so the path tracer starts in the water
             // medium when the eye is submerged, fixing the air→water first-segment orientation).
-            int flags = 0b10;
             var level = Minecraft.getInstance().level;
+            boolean restirEnabled = CausticaConfig.Rt.Restir.ENABLED.value();
+            if (level != restirLevel || restirEnabled != restirWasEnabled) {
+                restirHistoryValid = false;
+                restirLevel = level;
+                restirWasEnabled = restirEnabled;
+            }
+            int flags = 0b10;
             if (level != null) {
                 cameraBlockPos.set(Mth.floor(camX), Mth.floor(camY), Mth.floor(camZ));
                 // Height-aware, mirroring vanilla's own Camera.getFluidInCamera(): a plain block-granular
@@ -822,6 +869,15 @@ public final class RtComposite {
             }
             if (CausticaConfig.Rt.Clouds.ENABLED.value()) {
                 flags |= 0b1000000; // procedural volumetric clouds in primary/specular sky rays
+            }
+            if (restirEnabled) {
+                flags |= 0b10000000; // ReSTIR DI at the primary opaque receiver
+                if (CausticaConfig.Rt.Restir.SPATIAL_REUSE.value()) {
+                    flags |= 0b100000000; // gather compatible neighbouring history reservoirs
+                }
+                if (restirHistoryValid) {
+                    flags |= 0b1000000000; // previous ping-pong image contains initialized history
+                }
             }
 
             // W1/W2 water parameters: camera-biome tint plus wrapped animation time. Per-water-body tint
@@ -869,7 +925,8 @@ public final class RtComposite {
                     CausticaConfig.Rt.Fog.ANISOTROPY.value(),
                     CausticaConfig.Rt.Fog.MAX_DISTANCE.value());
             Float4 fogControl = new Float4(
-                    CausticaConfig.Rt.Fog.BASE_HEIGHT.value(), terrain.blockY, 0.92f, 0.0f);
+                    CausticaConfig.Rt.Fog.BASE_HEIGHT.value(), terrain.blockY, 0.92f,
+                    CausticaConfig.Rt.Restir.CANDIDATES.value());
             SkyPush sky = skyPush();
             new WorldPushData(
                     frameInvViewProj,
@@ -939,6 +996,7 @@ public final class RtComposite {
                  RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.trace")) {
                 active.trace(cmd, renderW, renderH, pushConstants);
             }
+            restirHistoryValid = restirEnabled;
             VulkanCommandEncoder.memoryBarrier(cmd, stack); // RT writes visible to DLSS reads
             // DLSS-RR denoise + upscale. The RT pass wrote noisy color (render res) + guides;
             // RR reads them and writes the display-res denoised result straight into rrOutput.
