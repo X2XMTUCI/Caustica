@@ -161,7 +161,10 @@ final class RtReliefPathTracingShaderTest {
         assertTrue(composite.contains("(int) emissiveLightAddress"));
         assertTrue(composite.contains("emissiveLightCount"));
         assertTrue(terrainMesher.contains("extractEmissiveTriangles"));
-        assertTrue(terrainMesher.contains("desc.emissionSource() == RtMaterialDesc.EmissionSource.NONE"));
+        assertTrue(terrainMesher.contains(
+                "fallbackEmission <= 0.0f && !desc.emissionSummary().emissive()"));
+        assertFalse(terrainMesher.contains(
+                "desc.emissionSource() == RtMaterialDesc.EmissionSource.NONE"));
         assertTrue(entities.contains("snapshotEmissiveCapture"));
         assertTrue(entities.contains("writeEmissiveTriangles"));
     }

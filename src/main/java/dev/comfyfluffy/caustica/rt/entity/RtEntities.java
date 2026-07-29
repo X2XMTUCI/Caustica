@@ -1487,9 +1487,7 @@ public final class RtEntities {
             }
             RtMaterialDesc desc = materials.material(materialId);
             if (desc.model() != RtMaterialRegistry.MODEL_OPAQUE
-                    || (fallbackEmission <= 0.0f
-                    && desc.emissionSource() == RtMaterialDesc.EmissionSource.NONE
-                    && !desc.emissionSummary().emissive())) {
+                    || (fallbackEmission <= 0.0f && !desc.emissionSummary().emissive())) {
                 continue;
             }
             for (int corner = 0; corner < 3; corner++) {
