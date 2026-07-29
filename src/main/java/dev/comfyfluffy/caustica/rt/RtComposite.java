@@ -106,6 +106,8 @@ public final class RtComposite {
     // Keep capacity for moving entities and block entities even in an emissive-heavy resident terrain
     // set. Static real + distant geometry uses the rest of the stable BDA array.
     private static final int STATIC_EMISSIVE_LIGHT_TRIANGLE_LIMIT = 60_000;
+    private static final int DISTANT_EMISSIVE_LIGHT_TRIANGLE_BUDGET = 512;
+    private static final float LOCAL_EMISSIVE_LIGHT_RADIUS = 64.0f;
     private static final long EMISSIVE_LIGHT_BUFFER_BYTES =
             (long) EMISSIVE_LIGHT_ENTRY_BYTES * MAX_EMISSIVE_LIGHT_TRIANGLES;
     // Frames a retired per-frame TLAS must outlive before it's freed (> frames-in-flight); matches
@@ -851,10 +853,12 @@ public final class RtComposite {
                 .order(ByteOrder.nativeOrder());
         if (rebuildStatic) {
             int count = terrain.writeEmissiveTriangles(dst, 0, STATIC_EMISSIVE_LIGHT_TRIANGLE_LIMIT,
-                    terrain.blockX, terrain.blockY, terrain.blockZ);
+                    terrain.blockX, terrain.blockY, terrain.blockZ, LOCAL_EMISSIVE_LIGHT_RADIUS);
+            int distantLimit = Math.min(STATIC_EMISSIVE_LIGHT_TRIANGLE_LIMIT,
+                    count + DISTANT_EMISSIVE_LIGHT_TRIANGLE_BUDGET);
             count = RtDistantHorizonsTerrain.INSTANCE.writeEmissiveTriangles(
-                    dst, count, STATIC_EMISSIVE_LIGHT_TRIANGLE_LIMIT,
-                    terrain.blockX, terrain.blockY, terrain.blockZ);
+                    dst, count, distantLimit,
+                    terrain.blockX, terrain.blockY, terrain.blockZ, LOCAL_EMISSIVE_LIGHT_RADIUS);
             staticEmissiveLightCount = count;
             emissiveTerrainRevision = terrainRevision;
             emissiveDistantRevision = distantRevision;

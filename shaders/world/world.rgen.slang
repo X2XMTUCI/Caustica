@@ -632,7 +632,7 @@ float restirPHat(RestirSample sample, float3 hitPos, float3 n, float3 v,
     // A texture-independent scalar target keeps temporal samples valid without storing material/list
     // indices. Exact emitted RGB, mask, orientation and occlusion are evaluated by the one selected ray.
     return max(luminance(response) * EMISSIVE_STRENGTH * sample.measure
-            / max(distance * distance, 0.01), 0.0);
+            / max(distance * distance, 0.0625), 0.0);
 }
 
 uint64_t restirLightAddress() {
@@ -930,7 +930,7 @@ float3 restirLocalTarget(RestirSample sample, float3 origin, float3 receiverNorm
         return float3(0.0, 0.0, 0.0);
     }
     return receiverResponse * emitted * cosEmitter * sample.measure
-            / max(targetDistance * targetDistance, 0.01);
+            / max(targetDistance * targetDistance, 0.0625);
 }
 
 float fogDensityAt(float3 position) {

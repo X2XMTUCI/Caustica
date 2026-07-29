@@ -256,8 +256,9 @@ public final class RtTerrain {
      * Each 48-byte entry is three float4 vertices; w is reserved for shader-side metadata.
      */
     public int writeEmissiveTriangles(ByteBuffer dst, int firstEntry, int maxEntries,
-                                      int rebaseX, int rebaseY, int rebaseZ) {
+                                      int rebaseX, int rebaseY, int rebaseZ, float maxDistance) {
         int count = firstEntry;
+        float maxDistance2 = maxDistance * maxDistance;
         ObjectIterator<Long2ObjectMap.Entry<SectionGeom>> it = resident.long2ObjectEntrySet().fastIterator();
         while (it.hasNext() && count < maxEntries) {
             SectionGeom geom = it.next().getValue();
@@ -267,6 +268,12 @@ public final class RtTerrain {
             float tx = geom.sx - rebaseX;
             float ty = geom.sy - rebaseY;
             float tz = geom.sz - rebaseZ;
+            float dx = axisDistanceToSection(tx);
+            float dy = axisDistanceToSection(ty);
+            float dz = axisDistanceToSection(tz);
+            if (dx * dx + dy * dy + dz * dz > maxDistance2) {
+                continue;
+            }
             float[] triangles = geom.emissiveTriangles;
             for (int base = 0; base + 8 < triangles.length && count < maxEntries; base += 9) {
                 int out = count * 48;
@@ -282,6 +289,16 @@ public final class RtTerrain {
             }
         }
         return count;
+    }
+
+    private static float axisDistanceToSection(float sectionOrigin) {
+        if (sectionOrigin > 0.0f) {
+            return sectionOrigin;
+        }
+        if (sectionOrigin + 16.0f < 0.0f) {
+            return -(sectionOrigin + 16.0f);
+        }
+        return 0.0f;
     }
 
     /** Per-tick residency update: window sync + dirty drain (plus the streaming fallback, see {@link #frame}). */

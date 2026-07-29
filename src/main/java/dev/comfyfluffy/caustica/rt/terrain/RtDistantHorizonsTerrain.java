@@ -272,12 +272,13 @@ public final class RtDistantHorizonsTerrain {
 
     /** Append emissive DH/Voxy proxy triangles using the same 48-byte format as real terrain. */
     public int writeEmissiveTriangles(ByteBuffer dst, int firstEntry, int maxEntries,
-                                      int rebaseX, int rebaseY, int rebaseZ) {
+                                      int rebaseX, int rebaseY, int rebaseZ, float maxDistance) {
         Proxy proxy = current;
         if (proxy == null) {
             return firstEntry;
         }
         int count = firstEntry;
+        float maxDistance2 = maxDistance * maxDistance;
         for (GeomEntry entry : proxy.entries) {
             RtSectionTable.SectionGeom geom = entry.geom;
             float[] triangles = geom.emissiveTriangles;
@@ -285,6 +286,12 @@ public final class RtDistantHorizonsTerrain {
             float ty = geom.sy - rebaseY;
             float tz = geom.sz - rebaseZ;
             for (int base = 0; base + 8 < triangles.length && count < maxEntries; base += 9) {
+                float cx = tx + (triangles[base] + triangles[base + 3] + triangles[base + 6]) / 3.0f;
+                float cy = ty + (triangles[base + 1] + triangles[base + 4] + triangles[base + 7]) / 3.0f;
+                float cz = tz + (triangles[base + 2] + triangles[base + 5] + triangles[base + 8]) / 3.0f;
+                if (cx * cx + cy * cy + cz * cz > maxDistance2) {
+                    continue;
+                }
                 int out = count * 48;
                 for (int corner = 0; corner < 3; corner++) {
                     int source = base + corner * 3;

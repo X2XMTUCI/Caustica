@@ -158,6 +158,8 @@ final class RtReliefPathTracingShaderTest {
         assertTrue(composite.contains("flags |= 0b1000000000"));
         assertTrue(composite.contains("MAX_EMISSIVE_LIGHT_TRIANGLES = 65_536"));
         assertTrue(composite.contains("STATIC_EMISSIVE_LIGHT_TRIANGLE_LIMIT = 60_000"));
+        assertTrue(composite.contains("DISTANT_EMISSIVE_LIGHT_TRIANGLE_BUDGET = 512"));
+        assertTrue(composite.contains("LOCAL_EMISSIVE_LIGHT_RADIUS = 64.0f"));
         assertTrue(composite.contains("(int) emissiveLightAddress"));
         assertTrue(composite.contains("emissiveLightCount"));
         assertTrue(terrainMesher.contains("extractEmissiveTriangles"));
