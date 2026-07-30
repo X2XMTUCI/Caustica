@@ -489,6 +489,7 @@ static const uint RESTIR_SPATIAL = 0x100u;
 static const uint RESTIR_HISTORY_VALID = 0x200u;
 static const uint RESTIR_TEMPORAL_STABLE = 0x400u;
 static const float RESTIR_MAX_M = 32.0;
+static const float RESTIR_SPATIAL_MAX_M = 4.0;
 static const float RESTIR_MAX_W = 64.0;
 static const float RESTIR_TEMPORAL_CURRENT_WEIGHT = 0.20;
 
@@ -753,11 +754,12 @@ bool restirPreviousCandidate(int2 pixel, int2 size, float3 receiverNormal,
 int2 restirSpatialOffset(int reuseIndex, int2 pixel) {
     // The old pattern was the invariant set {(+/-4, 0), (0, +/-4)}. Rotating that cross only
     // permuted the same four samples, producing the visible 4-pixel grid after DLSS reconstruction.
-    // Hash every tap independently and sample a small disk so adjacent pixels and frames no longer
-    // share a rigid lattice. The temporal tap remains exactly at the reprojected pixel.
+    // Hash every tap independently and sample a small disk so adjacent pixels do not share a rigid
+    // lattice. Deliberately keep this pattern stable between frames: frameIndex here made the entire
+    // neighbour set jump every frame and turned rare bright local-light reservoirs into red sparkles.
+    // The temporal tap remains exactly at the reprojected pixel.
     uint offsetSeed = uint(pixel.x) * 0x8da6b343u
             ^ uint(pixel.y) * 0xd8163841u
-            ^ worldPush.frameIndex * 0xcb1ab31fu
             ^ uint(reuseIndex) * 0x165667b1u;
     float angle = rndf(offsetSeed) * 6.28318530718;
     float radius = 1.0 + 3.0 * sqrt(rndf(offsetSeed));
@@ -885,9 +887,13 @@ RestirSample restirSelectDirect(int2 pixel, int2 size, float3 receiverPos, float
         float pHat = restirPHat(previousSample, receiverPos, receiverNormal,
                 v, diffAlb, F0, rough, pbr);
         // Combine the previous reservoir as one weighted super-candidate:
-        // w = pHat_current(y) * W_previous * M_previous.
-        restirUpdate(reservoir, previousSample, pHat, pHat * previousW * previousM,
-                previousM, seed);
+        // w = pHat_current(y) * W_previous * M_previous. A spatial neighbour is already a reservoir
+        // produced by temporal/spatial reuse, so importing all of its M recursively duplicates
+        // correlated evidence and lets one bright sample flood a growing screen region. Preserve its
+        // average weight but cap the represented population; the temporal center retains its full M.
+        float mergedM = spatialCandidate ? min(previousM, RESTIR_SPATIAL_MAX_M) : previousM;
+        restirUpdate(reservoir, previousSample, pHat, pHat * previousW * mergedM,
+                mergedM, seed);
     }
 
     if (reservoir.M > RESTIR_MAX_M) {

@@ -142,6 +142,10 @@ final class RtReliefPathTracingShaderTest {
         assertTrue(raygen.contains("expectedPreviousDepth * 0.0125"));
         assertTrue(raygen.contains("restirSpatialOffset(reuse, pixel)"));
         assertFalse(raygen.contains("if (reuse == 1) offset = int2(4, 0)"));
+        assertFalse(raygen.contains("^ worldPush.frameIndex * 0xcb1ab31fu"));
+        assertTrue(raygen.contains("RESTIR_SPATIAL_MAX_M = 4.0"));
+        assertTrue(raygen.contains(
+                "float mergedM = spatialCandidate ? min(previousM, RESTIR_SPATIAL_MAX_M) : previousM"));
         assertTrue(raygen.contains("RESTIR_TEMPORAL_CURRENT_WEIGHT = 0.20"));
         assertTrue(raygen.contains("(worldPush.flags & RESTIR_TEMPORAL_STABLE) == 0u"));
         assertTrue(raygen.contains("dot(objectMotion, objectMotion) > 1.0e-10"));
@@ -149,7 +153,7 @@ final class RtReliefPathTracingShaderTest {
         assertTrue(raygen.contains("restirTemporalRadiance(pix"));
         assertTrue(raygen.contains("outImage[pixel].rgb"));
         assertTrue(raygen.contains("abs(surfaceData.z - expectedPreviousDepth) <= depthTolerance"));
-        assertTrue(raygen.contains("pHat * previousW * previousM"));
+        assertTrue(raygen.contains("pHat * previousW * mergedM"));
         assertTrue(raygen.contains("restirNormalization"));
         assertTrue(raygen.contains("visibility(shadowP, lightDir, 10000.0) * heightVis"));
         assertFalse(raygen.contains("visibility(shadowP, candidateDir"));

@@ -5,8 +5,8 @@
 Install both files:
 
 - `caustica-0.1.0-voxy-compat.jar`
-  - Size: 40,214,704 bytes
-  - SHA-256: `7BF779B16E04403395EFC5EFF62BF4BDFA9842B9FC08E95BB6B2587F46FCA4B7`
+  - Size: 40,215,173 bytes
+  - SHA-256: `F4A00E903D53408E9BFCA6B7D1C04ABB38C9F3307234CB04DB7E2F1D1F212718`
 - `voxy-0.2.18-beta-caustica.11-mc26.2.jar`
   - Size: 38,810,490 bytes
   - SHA-256: `1FC472DA6C3986D74E68EBF794B2D234BDF9CD9FD41E0E13BB4E860FF1EF516B`
@@ -43,10 +43,14 @@ The final endpoint remains fully ray traced, but tiny bright torch quads and spa
 no longer produce rare, enormous samples that Ray Reconstruction spreads into white/orange patches
 and structured stripes. Average emitted power drives the triangle CDF and cancels analytically
 against the proposal PDF; a packed average chromaticity supplies colour after endpoint validation.
-Spatial reuse no longer samples the same invariant four-pixel cross: each tap uses a decorrelated
-disk pattern, and spatial history has stricter normal/depth rejection than temporal reprojection.
-This removes the regular micro-grid and prevents bright reservoirs from leaking across silhouettes
-or rasterization-triangle boundaries.
+Spatial reuse no longer samples the same invariant four-pixel cross: each tap uses a per-pixel
+decorrelated disk pattern, and spatial history has stricter normal/depth rejection than temporal
+reprojection. The disk is stable between frames rather than being regenerated from `frameIndex`,
+so its complete neighbour set no longer jumps and flickers every frame. A spatial reservoir imports
+at most four represented samples while preserving its average weight; this prevents correlated
+reservoirs from recursively multiplying one bright local-light selection across the screen.
+Together these changes remove the regular micro-grid, red/orange sparkle and leakage across
+silhouettes or rasterization-triangle boundaries.
 The raw radiance input now applies a five-frame stationary EMA before Ray Reconstruction. The CPU
 enables it only when camera position and the complete jitter-free view/projection transform exactly
 match the previous rendered frame; dynamic receiver motion is rejected separately. Same-surface
