@@ -145,7 +145,12 @@ final class RtReliefPathTracingShaderTest {
         assertFalse(raygen.contains("^ worldPush.frameIndex * 0xcb1ab31fu"));
         assertTrue(raygen.contains("RESTIR_SPATIAL_MAX_M = 4.0"));
         assertTrue(raygen.contains(
-                "float mergedM = spatialCandidate ? min(previousM, RESTIR_SPATIAL_MAX_M) : previousM"));
+                "float mergedM = min(previousM, RESTIR_SPATIAL_MAX_M)"));
+        assertTrue(raygen.contains("RestirReservoir temporalReservoir = reservoir"));
+        assertTrue(raygen.contains("restirReservoirNormalization(temporalReservoir)"));
+        assertTrue(raygen.contains("temporalReservoir.sample.measure"));
+        assertTrue(raygen.contains("restirPackState(historyNormalization, temporalReservoir.M)"));
+        assertFalse(raygen.contains("restirPackState(normalization, reservoir.M)"));
         assertTrue(raygen.contains("RESTIR_TEMPORAL_CURRENT_WEIGHT = 0.20"));
         assertTrue(raygen.contains("(worldPush.flags & RESTIR_TEMPORAL_STABLE) == 0u"));
         assertTrue(raygen.contains("dot(objectMotion, objectMotion) > 1.0e-10"));
@@ -164,7 +169,7 @@ final class RtReliefPathTracingShaderTest {
         assertTrue(raygen.contains("pHat * inversePdf"));
         assertTrue(raygen.contains("EMISSIVE_STRENGTH * sample.measure"));
         assertTrue(raygen.contains("bool restirThisVertex = (worldPush.flags & RESTIR_ENABLED) != 0u"));
-        assertTrue(raygen.contains("reservoir.sample.value - worldPush.camOffset"));
+        assertTrue(raygen.contains("temporalReservoir.sample.value - worldPush.camOffset"));
         assertTrue(raygen.contains("sampleData.xyz + worldPush.camOffset - worldPush.camDelta"));
         assertTrue(raygen.contains("!emissionCoveredByPreviousNee"));
         assertTrue(raygen.contains("bool localRestirDomain = restirThisVertex"));

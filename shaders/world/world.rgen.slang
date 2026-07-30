@@ -582,6 +582,20 @@ void restirUpdate(inout RestirReservoir reservoir, RestirSample sample, float pH
     reservoir.M += candidateM;
 }
 
+void restirClampPopulation(inout RestirReservoir reservoir) {
+    if (reservoir.M > RESTIR_MAX_M) {
+        reservoir.weightSum *= RESTIR_MAX_M / reservoir.M;
+        reservoir.M = RESTIR_MAX_M;
+    }
+}
+
+float restirReservoirNormalization(RestirReservoir reservoir) {
+    return reservoir.selectedPHat > 1.0e-8 && reservoir.M > 0.0
+            ? clamp(reservoir.weightSum / (reservoir.M * reservoir.selectedPHat),
+                    0.0, RESTIR_MAX_W)
+            : 0.0;
+}
+
 float3 restirBrdfResponse(float3 n, float3 v, float3 lightDir, float3 diffAlb,
                           float3 F0, float rough, bool pbr) {
     float ndl = max(0.0, dot(n, lightDir));
@@ -862,56 +876,61 @@ RestirSample restirSelectDirect(int2 pixel, int2 size, float3 receiverPos, float
         previousPixel = int2(floor(previousUv * float2(size)));
     }
 
-    int reuseCount = (worldPush.flags & RESTIR_SPATIAL) != 0u ? 5 : 1;
-    [loop]
-    for (int reuse = 0; reuse < reuseCount && canReuse; ++reuse) {
-        bool spatialCandidate = reuse != 0;
-        int2 offset = spatialCandidate
-                ? restirSpatialOffset(reuse, pixel)
-                : int2(0, 0);
-
+    // First merge only this receiver's reprojected temporal reservoir. This is the state persisted
+    // for the next frame. Persisting the final spatial result creates a feedback loop: neighbouring
+    // pixels repeatedly re-import reservoirs that already contain one another, so a bright selection
+    // circulates and flickers even with a stable spatial pattern.
+    if (canReuse) {
         RestirSample previousSample;
         float previousW;
         float previousM;
-        if (!restirPreviousCandidate(previousPixel + offset, size, receiverNormal,
-                expectedPreviousDepth, spatialCandidate, previousSample, previousW, previousM)) {
-            continue;
+        if (restirPreviousCandidate(previousPixel, size, receiverNormal,
+                expectedPreviousDepth, false, previousSample, previousW, previousM)
+                && !((hasLocal && previousSample.measure < 0.0)
+                || (!hasLocal && previousSample.measure > 0.0))) {
+            float pHat = restirPHat(previousSample, receiverPos, receiverNormal,
+                    v, diffAlb, F0, rough, pbr);
+            restirUpdate(reservoir, previousSample, pHat, pHat * previousW * previousM,
+                    previousM, seed);
         }
-        // Geometry-list publication invalidates static history. This additional domain check covers a
-        // dynamic emitter appearing/disappearing between frames without letting a celestial reservoir
-        // contaminate the local one (or vice versa).
-        if ((hasLocal && previousSample.measure < 0.0)
-                || (!hasLocal && previousSample.measure > 0.0)) {
-            continue;
-        }
-        float pHat = restirPHat(previousSample, receiverPos, receiverNormal,
-                v, diffAlb, F0, rough, pbr);
-        // Combine the previous reservoir as one weighted super-candidate:
-        // w = pHat_current(y) * W_previous * M_previous. A spatial neighbour is already a reservoir
-        // produced by temporal/spatial reuse, so importing all of its M recursively duplicates
-        // correlated evidence and lets one bright sample flood a growing screen region. Preserve its
-        // average weight but cap the represented population; the temporal center retains its full M.
-        float mergedM = spatialCandidate ? min(previousM, RESTIR_SPATIAL_MAX_M) : previousM;
-        restirUpdate(reservoir, previousSample, pHat, pHat * previousW * mergedM,
-                mergedM, seed);
     }
+    restirClampPopulation(reservoir);
+    RestirReservoir temporalReservoir = reservoir;
 
-    if (reservoir.M > RESTIR_MAX_M) {
-        reservoir.weightSum *= RESTIR_MAX_M / reservoir.M;
-        reservoir.M = RESTIR_MAX_M;
+    // Spatial reuse is a terminal current-frame pass. Read temporal-only neighbour histories and
+    // never feed this spatially merged reservoir back into them.
+    if (canReuse && (worldPush.flags & RESTIR_SPATIAL) != 0u) {
+        [loop]
+        for (int reuse = 1; reuse < 5; ++reuse) {
+            RestirSample previousSample;
+            float previousW;
+            float previousM;
+            int2 offset = restirSpatialOffset(reuse, pixel);
+            if (!restirPreviousCandidate(previousPixel + offset, size, receiverNormal,
+                    expectedPreviousDepth, true, previousSample, previousW, previousM)
+                    || (hasLocal && previousSample.measure < 0.0)
+                    || (!hasLocal && previousSample.measure > 0.0)) {
+                continue;
+            }
+            float pHat = restirPHat(previousSample, receiverPos, receiverNormal,
+                    v, diffAlb, F0, rough, pbr);
+            float mergedM = min(previousM, RESTIR_SPATIAL_MAX_M);
+            restirUpdate(reservoir, previousSample, pHat, pHat * previousW * mergedM,
+                    mergedM, seed);
+        }
     }
-    normalization = reservoir.selectedPHat > 1.0e-8 && reservoir.M > 0.0
-            ? clamp(reservoir.weightSum / (reservoir.M * reservoir.selectedPHat), 0.0, RESTIR_MAX_W)
-            : 0.0;
+    restirClampPopulation(reservoir);
+    normalization = restirReservoirNormalization(reservoir);
     float receiverDepth = length(historyHitPos - worldPush.camOffset);
     if (useHistory) {
-        float3 storedValue = reservoir.sample.measure > 0.0
-                ? reservoir.sample.value - worldPush.camOffset
-                : reservoir.sample.value;
+        float historyNormalization = restirReservoirNormalization(temporalReservoir);
+        float3 storedValue = temporalReservoir.sample.measure > 0.0
+                ? temporalReservoir.sample.value - worldPush.camOffset
+                : temporalReservoir.sample.value;
         restirStoreCurrent(pixel,
-                float4(storedValue, reservoir.sample.measure),
+                float4(storedValue, temporalReservoir.sample.measure),
                 float4(restirEncodeNormal(receiverNormal), receiverDepth,
-                        restirPackState(normalization, reservoir.M)));
+                        restirPackState(historyNormalization, temporalReservoir.M)));
     }
     return reservoir.sample;
 }

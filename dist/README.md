@@ -5,8 +5,8 @@
 Install both files:
 
 - `caustica-0.1.0-voxy-compat.jar`
-  - Size: 40,215,173 bytes
-  - SHA-256: `F4A00E903D53408E9BFCA6B7D1C04ABB38C9F3307234CB04DB7E2F1D1F212718`
+  - Size: 40,233,345 bytes
+  - SHA-256: `160F50F69D5E695FBC3871E5BBE5FAEC8B17E884EF428D802B751826694C179C`
 - `voxy-0.2.18-beta-caustica.11-mc26.2.jar`
   - Size: 38,810,490 bytes
   - SHA-256: `1FC472DA6C3986D74E68EBF794B2D234BDF9CD9FD41E0E13BB4E860FF1EF516B`
@@ -48,9 +48,12 @@ decorrelated disk pattern, and spatial history has stricter normal/depth rejecti
 reprojection. The disk is stable between frames rather than being regenerated from `frameIndex`,
 so its complete neighbour set no longer jumps and flickers every frame. A spatial reservoir imports
 at most four represented samples while preserving its average weight; this prevents correlated
-reservoirs from recursively multiplying one bright local-light selection across the screen.
-Together these changes remove the regular micro-grid, red/orange sparkle and leakage across
-silhouettes or rasterization-triangle boundaries.
+reservoirs from multiplying one bright local-light selection across the screen. Only the temporally
+reprojected reservoir is persisted for the next frame; the spatially merged result is a terminal
+lighting estimate and is never fed back into neighbouring histories. This removes the cyclic spatial
+feedback that previously made otherwise stable reservoirs pulse between frames. Together these
+changes remove the regular micro-grid, red/orange sparkle and leakage across silhouettes or
+rasterization-triangle boundaries.
 The raw radiance input now applies a five-frame stationary EMA before Ray Reconstruction. The CPU
 enables it only when camera position and the complete jitter-free view/projection transform exactly
 match the previous rendered frame; dynamic receiver motion is rejected separately. Same-surface
