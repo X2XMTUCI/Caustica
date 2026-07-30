@@ -13,8 +13,10 @@ import world_common;
 [[vk::push_constant]] WorldPushConstants pc;
 
 // Vanilla celestials atlas (sun + moon-phase sprites), bound by RtComposite. Sampled with an explicit
-// LOD (no derivatives in a miss shader). The sun/moon discs are drawn from its real texels.
-[[vk::binding(9, 0)]] Sampler2D celestialsAtlas;
+// LOD (no derivatives in a miss shader). Bindings 3..12 are the six DLSS-RR guides plus four ReSTIR
+// history images, so RtPipeline places this sampler at 13. Keeping the old binding 9 aliases restirA0
+// as a sampled atlas and feeds reservoir data back into path misses as bogus HDR sky radiance.
+[[vk::binding(13, 0)]] Sampler2D celestialsAtlas;
 
 static const float PI = 3.14159265359;
 float pow2(float x) { return x * x; }

@@ -5,8 +5,8 @@
 Install both files:
 
 - `caustica-0.1.0-voxy-compat.jar`
-  - Size: 40,204,319 bytes
-  - SHA-256: `B60409611CB9A3BBD877366C6B44D49E51BEC410B183AC1DA01D3B3D7BD2E825`
+  - Size: 40,199,460 bytes
+  - SHA-256: `4765472845DDEF1A0B1DDBD80F249E8DBF3AE4CDCA24FC3383051CDCF6CC83A5`
 - `voxy-0.2.18-beta-caustica.11-mc26.2.jar`
   - Size: 38,810,490 bytes
   - SHA-256: `1FC472DA6C3986D74E68EBF794B2D234BDF9CD9FD41E0E13BB4E860FF1EF516B`
@@ -27,6 +27,10 @@ an occluded sun from suppressing indoor emitters or transferring its normalizati
 fireflies. Materials that merely provide a PBR specular map but have no non-zero emission channel are
 excluded from the bounded light list, leaving its capacity for actual torches, lava and authored
 emissive texels. Video Settings expose the ReSTIR toggle, candidate count and spatial-reuse toggle.
+The celestial-atlas descriptor now follows the expanded guide/reservoir layout at set 0 binding 13.
+The previous shader still used the pre-ReSTIR binding 9 and therefore sampled the `restirA0` storage
+image as the sun/moon atlas, feeding reservoir values back into path misses as extreme HDR radiance.
+The corrected descriptor ABI removes the triangular white/amber feedback and DLSS-RR dot pattern.
 History is invalidated on geometry publication/rebase, world, resource-pack, resolution and
 enable-state changes. Local-emitter proposals are restricted to the nearby 64-block light domain,
 with a separate 512-triangle budget for Voxy/Distant Horizons proxies; the same near-distance
