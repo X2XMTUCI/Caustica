@@ -5,11 +5,11 @@
 Install both files:
 
 - `caustica-0.1.0-voxy-compat.jar`
-  - Size: 40,205,013 bytes
-  - SHA-256: `881F4FA445A861B4E2EE71B331F87B843158344530849AF73544F2426F6605D2`
+  - Size: 40,205,240 bytes
+  - SHA-256: `4880E0D5A7641E1FA5E977842BF076F0A0E7B137970C992FD05B2F355AA2ACC7`
 - `voxy-0.2.18-beta-caustica.11-mc26.2.jar`
   - Size: 38,810,490 bytes
-  - SHA-256: `1FC472DA6C3986D74E68EBF794B2D234BDF9CD9FD41E0E13BB4E860FF1EF516B`
+  - SHA-256: `49416DE07CB3CF421F8B53C84FEAC0F585DB39885537156849AD2C729CE084FE`
 
 This Voxy edition is a CPU-side world/LOD provider for Caustica. It does not require Sodium and
 does not start Voxy's standalone raster renderer. Caustica progressively converts Voxy LOD meshes
