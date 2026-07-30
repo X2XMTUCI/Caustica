@@ -5,8 +5,8 @@
 Install both files:
 
 - `caustica-0.1.0-voxy-compat.jar`
-  - Size: 40,202,405 bytes
-  - SHA-256: `6C29D3ABEA871AB83B8D918082DB3358F1227FF20446D692CCF65818DCC5E73B`
+  - Size: 40,205,013 bytes
+  - SHA-256: `881F4FA445A861B4E2EE71B331F87B843158344530849AF73544F2426F6605D2`
 - `voxy-0.2.18-beta-caustica.11-mc26.2.jar`
   - Size: 38,810,490 bytes
   - SHA-256: `1FC472DA6C3986D74E68EBF794B2D234BDF9CD9FD41E0E13BB4E860FF1EF516B`
@@ -43,6 +43,10 @@ The final endpoint remains fully ray traced, but tiny bright torch quads and spa
 no longer produce rare, enormous samples that Ray Reconstruction spreads into white/orange patches
 and structured stripes. Average emitted power drives the triangle CDF and cancels analytically
 against the proposal PDF; a packed average chromaticity supplies colour after endpoint validation.
+Spatial reuse no longer samples the same invariant four-pixel cross: each tap uses a decorrelated
+disk pattern, and spatial history has stricter normal/depth rejection than temporal reprojection.
+This removes the regular micro-grid and prevents bright reservoirs from leaking across silhouettes
+or rasterization-triangle boundaries.
 The user-facing candidate count and spatial reuse controls remain available.
 The `.11` build adds live Voxy controls to Caustica's Video Settings screen: enable/disable,
 new-chunk ingestion, a stepped 32-512 chunk LOD distance, and a bounded rebuild button. Changes

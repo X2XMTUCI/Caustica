@@ -692,7 +692,7 @@ RestirSample restirFreshLocal(inout uint seed, out float inversePdf) {
 }
 
 bool restirPreviousCandidate(int2 pixel, int2 size, float3 receiverNormal,
-                             float expectedPreviousDepth,
+                             float expectedPreviousDepth, bool spatialCandidate,
                              out RestirSample sample, out float normalization, out float sampleCount) {
     sample.value = float3(0.0, 1.0, 0.0);
     sample.measure = 0.0;
@@ -716,7 +716,11 @@ bool restirPreviousCandidate(int2 pixel, int2 size, float3 receiverNormal,
         return false;
     }
     float3 previousNormal = restirDecodeNormal(surfaceData.xy);
-    if (!(dot(previousNormal, receiverNormal) > 0.88)) {
+    // Spatial reuse is much more likely than temporal reprojection to cross a silhouette, a block
+    // boundary, or one of the triangles used to rasterize a nominally flat face. A loose normal/depth
+    // gate turns one bright reservoir into screen-space triangles after reconstruction.
+    float normalThreshold = spatialCandidate ? 0.985 : 0.94;
+    if (!(dot(previousNormal, receiverNormal) > normalThreshold)) {
         return false;
     }
     // A /time jump or the sun-to-moon handoff changes the emitter proposal itself. Do not drag an old
@@ -728,7 +732,9 @@ bool restirPreviousCandidate(int2 pixel, int2 size, float3 receiverNormal,
             return false;
         }
     }
-    float depthTolerance = max(0.35, expectedPreviousDepth * 0.035);
+    float depthTolerance = spatialCandidate
+            ? max(0.08, expectedPreviousDepth * 0.0125)
+            : max(0.20, expectedPreviousDepth * 0.025);
     if (!(abs(surfaceData.z - expectedPreviousDepth) <= depthTolerance)) {
         return false;
     }
@@ -739,6 +745,24 @@ bool restirPreviousCandidate(int2 pixel, int2 size, float3 receiverNormal,
             : sampleData.xyz + worldPush.camOffset - worldPush.camDelta;
     sample.measure = sampleData.w;
     return true;
+}
+
+int2 restirSpatialOffset(int reuseIndex, int2 pixel) {
+    // The old pattern was the invariant set {(+/-4, 0), (0, +/-4)}. Rotating that cross only
+    // permuted the same four samples, producing the visible 4-pixel grid after DLSS reconstruction.
+    // Hash every tap independently and sample a small disk so adjacent pixels and frames no longer
+    // share a rigid lattice. The temporal tap remains exactly at the reprojected pixel.
+    uint offsetSeed = uint(pixel.x) * 0x8da6b343u
+            ^ uint(pixel.y) * 0xd8163841u
+            ^ worldPush.frameIndex * 0xcb1ab31fu
+            ^ uint(reuseIndex) * 0x165667b1u;
+    float angle = rndf(offsetSeed) * 6.28318530718;
+    float radius = 1.0 + 3.0 * sqrt(rndf(offsetSeed));
+    int2 offset = int2(round(float2(cos(angle), sin(angle)) * radius));
+    if (offset.x == 0 && offset.y == 0) {
+        offset.x = (offsetSeed & 1u) == 0u ? 1 : -1;
+    }
+    return offset;
 }
 
 RestirSample restirSelectDirect(int2 pixel, int2 size, float3 receiverPos, float3 historyHitPos,
@@ -790,22 +814,16 @@ RestirSample restirSelectDirect(int2 pixel, int2 size, float3 receiverPos, float
     int reuseCount = (worldPush.flags & RESTIR_SPATIAL) != 0u ? 5 : 1;
     [loop]
     for (int reuse = 0; reuse < reuseCount && canReuse; ++reuse) {
-        int2 offset = int2(0, 0);
-        if (reuse == 1) offset = int2(4, 0);
-        else if (reuse == 2) offset = int2(-4, 0);
-        else if (reuse == 3) offset = int2(0, 4);
-        else if (reuse == 4) offset = int2(0, -4);
-        // Rotate the cross per pixel/frame to avoid a persistent axis-aligned reuse pattern.
-        uint rotation = (seed >> 8) & 3u;
-        if (rotation == 1u) offset = int2(-offset.y, offset.x);
-        else if (rotation == 2u) offset = -offset;
-        else if (rotation == 3u) offset = int2(offset.y, -offset.x);
+        bool spatialCandidate = reuse != 0;
+        int2 offset = spatialCandidate
+                ? restirSpatialOffset(reuse, pixel)
+                : int2(0, 0);
 
         RestirSample previousSample;
         float previousW;
         float previousM;
         if (!restirPreviousCandidate(previousPixel + offset, size, receiverNormal,
-                expectedPreviousDepth, previousSample, previousW, previousM)) {
+                expectedPreviousDepth, spatialCandidate, previousSample, previousW, previousM)) {
             continue;
         }
         // Geometry-list publication invalidates static history. This additional domain check covers a
