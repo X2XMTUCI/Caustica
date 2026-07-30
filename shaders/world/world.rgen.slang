@@ -487,10 +487,10 @@ float3 sampleSquare(float3 axis, float halfAngle, inout uint s) {
 static const uint RESTIR_ENABLED = 0x80u;
 static const uint RESTIR_SPATIAL = 0x100u;
 static const uint RESTIR_HISTORY_VALID = 0x200u;
+static const uint RESTIR_TEMPORAL_STABLE = 0x400u;
 static const float RESTIR_MAX_M = 32.0;
 static const float RESTIR_MAX_W = 64.0;
 static const float RESTIR_TEMPORAL_CURRENT_WEIGHT = 0.20;
-static const float RESTIR_TEMPORAL_MAX_MOTION2 = 0.0625; // 0.25 render pixels squared
 
 struct EmissiveTriangle {
     float4 p0;
@@ -780,7 +780,10 @@ bool restirTemporalSurfaceCompatible(int2 pixel, int2 size, float3 receiverNorma
         return false;
     }
     float3 previousNormal = restirDecodeNormal(surfaceData.xy);
-    if (!(dot(previousNormal, receiverNormal) > 0.995)) {
+    // This is a shading normal and can legitimately change inside one high-resolution normal-map
+    // texel as the DLSS jitter moves. Only reject a different geometric hemisphere; camera stability
+    // and depth perform the precise same-surface test.
+    if (!(dot(previousNormal, receiverNormal) > 0.25)) {
         return false;
     }
     float depthTolerance = max(0.05, receiverDepth * 0.005);
@@ -788,12 +791,14 @@ bool restirTemporalSurfaceCompatible(int2 pixel, int2 size, float3 receiverNorma
 }
 
 float3 restirTemporalRadiance(int2 pixel, int2 size, float3 currentRadiance,
-                              float3 receiverNormal, float receiverDepth, float2 motion) {
+                              float3 receiverNormal, float receiverDepth, float3 objectMotion) {
     // Reading and then writing the same pixel is race-free: no invocation touches a neighbour. History
-    // is deliberately used only below a quarter-pixel of motion, so camera/object motion and
-    // disocclusions never require cross-pixel reads from an image concurrently being overwritten.
+    // is enabled by a CPU-side exact camera transform comparison. Per-pixel screen motion was the
+    // wrong gate: DLSS jitter kept it non-zero while standing, while parallax could make it nearly zero
+    // during real movement. Dynamic receivers are rejected independently by their world displacement.
     if ((worldPush.flags & RESTIR_ENABLED) == 0u || worldPush.breakingPad2 == 0u
-            || dot(motion, motion) > RESTIR_TEMPORAL_MAX_MOTION2
+            || (worldPush.flags & RESTIR_TEMPORAL_STABLE) == 0u
+            || dot(objectMotion, objectMotion) > 1.0e-10
             || !restirTemporalSurfaceCompatible(pixel, size, receiverNormal, receiverDepth)) {
         return currentRadiance;
     }
@@ -1749,6 +1754,6 @@ void main() {
     // disocclusion, normal/depth mismatch, invalidated history, sky, water or glass uses the untouched
     // current estimate, preventing trails and cross-surface light leaks.
     frameRadiance = restirTemporalRadiance(pix, int2(DispatchRaysDimensions().xy),
-            frameRadiance, gv_normal, length(gv_hitCamRel), motion);
+            frameRadiance, gv_normal, length(gv_hitCamRel), gv_motionObjDisp);
     outImage[pix] = float4(frameRadiance, 1.0);
 }

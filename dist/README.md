@@ -5,8 +5,8 @@
 Install both files:
 
 - `caustica-0.1.0-voxy-compat.jar`
-  - Size: 40,213,375 bytes
-  - SHA-256: `4062EB0B89D5FE8B19FF191428F930BDAE213848E65EAB1AF5413365EA746554`
+  - Size: 40,214,704 bytes
+  - SHA-256: `7BF779B16E04403395EFC5EFF62BF4BDFA9842B9FC08E95BB6B2587F46FCA4B7`
 - `voxy-0.2.18-beta-caustica.11-mc26.2.jar`
   - Size: 38,810,490 bytes
   - SHA-256: `1FC472DA6C3986D74E68EBF794B2D234BDF9CD9FD41E0E13BB4E860FF1EF516B`
@@ -47,10 +47,12 @@ Spatial reuse no longer samples the same invariant four-pixel cross: each tap us
 disk pattern, and spatial history has stricter normal/depth rejection than temporal reprojection.
 This removes the regular micro-grid and prevents bright reservoirs from leaking across silhouettes
 or rasterization-triangle boundaries.
-The raw radiance input now applies a five-frame stationary EMA before Ray Reconstruction. History is
-accepted only for an almost motionless pixel whose previous ReSTIR surface agrees in normal and
-camera depth; moving geometry, camera motion, disocclusions, sky, water, glass and invalidated
-reservoir history bypass it immediately. This reduces crawling one-ray torch/GI noise without extra
+The raw radiance input now applies a five-frame stationary EMA before Ray Reconstruction. The CPU
+enables it only when camera position and the complete jitter-free view/projection transform exactly
+match the previous rendered frame; dynamic receiver motion is rejected separately. Same-surface
+validation tolerates high-resolution normal-map variation from DLSS jitter while retaining strict
+depth and hemisphere checks. Camera motion, disocclusions, sky, water, glass and invalidated reservoir
+history bypass accumulation immediately. This reduces crawling one-ray torch/GI noise without extra
 rays, descriptors or VRAM and without cross-pixel history reads that could produce ghost trails.
 The user-facing candidate count and spatial reuse controls remain available.
 The `.11` build adds live Voxy controls to Caustica's Video Settings screen: enable/disable,
