@@ -5,8 +5,8 @@
 Install both files:
 
 - `caustica-0.1.0-voxy-compat.jar`
-  - Size: 40,205,013 bytes
-  - SHA-256: `881F4FA445A861B4E2EE71B331F87B843158344530849AF73544F2426F6605D2`
+  - Size: 40,213,375 bytes
+  - SHA-256: `4062EB0B89D5FE8B19FF191428F930BDAE213848E65EAB1AF5413365EA746554`
 - `voxy-0.2.18-beta-caustica.11-mc26.2.jar`
   - Size: 38,810,490 bytes
   - SHA-256: `1FC472DA6C3986D74E68EBF794B2D234BDF9CD9FD41E0E13BB4E860FF1EF516B`
@@ -47,6 +47,11 @@ Spatial reuse no longer samples the same invariant four-pixel cross: each tap us
 disk pattern, and spatial history has stricter normal/depth rejection than temporal reprojection.
 This removes the regular micro-grid and prevents bright reservoirs from leaking across silhouettes
 or rasterization-triangle boundaries.
+The raw radiance input now applies a five-frame stationary EMA before Ray Reconstruction. History is
+accepted only for an almost motionless pixel whose previous ReSTIR surface agrees in normal and
+camera depth; moving geometry, camera motion, disocclusions, sky, water, glass and invalidated
+reservoir history bypass it immediately. This reduces crawling one-ray torch/GI noise without extra
+rays, descriptors or VRAM and without cross-pixel history reads that could produce ghost trails.
 The user-facing candidate count and spatial reuse controls remain available.
 The `.11` build adds live Voxy controls to Caustica's Video Settings screen: enable/disable,
 new-chunk ingestion, a stepped 32-512 chunk LOD distance, and a bounded rebuild button. Changes

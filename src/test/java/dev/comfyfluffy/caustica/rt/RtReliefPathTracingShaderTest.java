@@ -142,6 +142,11 @@ final class RtReliefPathTracingShaderTest {
         assertTrue(raygen.contains("expectedPreviousDepth * 0.0125"));
         assertTrue(raygen.contains("restirSpatialOffset(reuse, pixel)"));
         assertFalse(raygen.contains("if (reuse == 1) offset = int2(4, 0)"));
+        assertTrue(raygen.contains("RESTIR_TEMPORAL_CURRENT_WEIGHT = 0.20"));
+        assertTrue(raygen.contains("dot(motion, motion) > RESTIR_TEMPORAL_MAX_MOTION2"));
+        assertTrue(raygen.contains("dot(previousNormal, receiverNormal) > 0.995"));
+        assertTrue(raygen.contains("restirTemporalRadiance(pix"));
+        assertTrue(raygen.contains("outImage[pixel].rgb"));
         assertTrue(raygen.contains("abs(surfaceData.z - expectedPreviousDepth) <= depthTolerance"));
         assertTrue(raygen.contains("pHat * previousW * previousM"));
         assertTrue(raygen.contains("restirNormalization"));

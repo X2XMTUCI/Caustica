@@ -16,8 +16,9 @@
 //
 // SER: the build emits EXT and NV shader-invocation-reorder variants from this source.
 //
-// Each frame emits a single SPP-averaged (still noisy) estimate; temporal convergence is the denoiser's
-// job. With RR disabled the output is the raw noisy path trace — a reference view, not a converged image.
+// Each frame emits a single SPP-averaged estimate. A short, surface-validated stationary history
+// suppresses the worst one-sample ReSTIR/GI variance before DLSS-RR; moving/disoccluded pixels remain
+// untouched. With RR disabled the result is still only a lightly stabilized reference view.
 import world_common;
 
 [[vk::push_constant]] WorldPushConstants pc;
@@ -488,6 +489,8 @@ static const uint RESTIR_SPATIAL = 0x100u;
 static const uint RESTIR_HISTORY_VALID = 0x200u;
 static const float RESTIR_MAX_M = 32.0;
 static const float RESTIR_MAX_W = 64.0;
+static const float RESTIR_TEMPORAL_CURRENT_WEIGHT = 0.20;
+static const float RESTIR_TEMPORAL_MAX_MOTION2 = 0.0625; // 0.25 render pixels squared
 
 struct EmissiveTriangle {
     float4 p0;
@@ -763,6 +766,47 @@ int2 restirSpatialOffset(int reuseIndex, int2 pixel) {
         offset.x = (offsetSeed & 1u) == 0u ? 1 : -1;
     }
     return offset;
+}
+
+bool restirTemporalSurfaceCompatible(int2 pixel, int2 size, float3 receiverNormal,
+                                     float receiverDepth) {
+    if (pixel.x < 0 || pixel.y < 0 || pixel.x >= size.x || pixel.y >= size.y
+            || (worldPush.flags & RESTIR_HISTORY_VALID) == 0u) {
+        return false;
+    }
+    float4 surfaceData = restirLoadPreviousSurface(pixel);
+    if (!(surfaceData.z > 0.0 && surfaceData.z < 20000.0)
+            || !(receiverDepth > 0.0 && receiverDepth < 20000.0)) {
+        return false;
+    }
+    float3 previousNormal = restirDecodeNormal(surfaceData.xy);
+    if (!(dot(previousNormal, receiverNormal) > 0.995)) {
+        return false;
+    }
+    float depthTolerance = max(0.05, receiverDepth * 0.005);
+    return abs(surfaceData.z - receiverDepth) <= depthTolerance;
+}
+
+float3 restirTemporalRadiance(int2 pixel, int2 size, float3 currentRadiance,
+                              float3 receiverNormal, float receiverDepth, float2 motion) {
+    // Reading and then writing the same pixel is race-free: no invocation touches a neighbour. History
+    // is deliberately used only below a quarter-pixel of motion, so camera/object motion and
+    // disocclusions never require cross-pixel reads from an image concurrently being overwritten.
+    if ((worldPush.flags & RESTIR_ENABLED) == 0u || worldPush.breakingPad2 == 0u
+            || dot(motion, motion) > RESTIR_TEMPORAL_MAX_MOTION2
+            || !restirTemporalSurfaceCompatible(pixel, size, receiverNormal, receiverDepth)) {
+        return currentRadiance;
+    }
+    float3 previousRadiance = outImage[pixel].rgb;
+    // Comparisons reject NaN as well as stale half-float overflow. Do not clamp a valid stochastic
+    // sample: a fixed five-frame EMA remains energy preserving and DLSS-RR performs the final
+    // edge-aware reconstruction.
+    if (!(previousRadiance.r >= 0.0 && previousRadiance.r < 65504.0)
+            || !(previousRadiance.g >= 0.0 && previousRadiance.g < 65504.0)
+            || !(previousRadiance.b >= 0.0 && previousRadiance.b < 65504.0)) {
+        return currentRadiance;
+    }
+    return lerp(previousRadiance, currentRadiance, RESTIR_TEMPORAL_CURRENT_WEIGHT);
 }
 
 RestirSample restirSelectDirect(int2 pixel, int2 size, float3 receiverPos, float3 historyHitPos,
@@ -1700,6 +1744,11 @@ void main() {
         return;
     }
 
-    // Single noisy estimate; the denoiser (DLSS-RR) handles temporal convergence.
+    // A short stationary prefilter removes the high-frequency one-ray variance that otherwise reaches
+    // DLSS-RR as crawling torch noise. It never reprojects across pixels: any appreciable motion,
+    // disocclusion, normal/depth mismatch, invalidated history, sky, water or glass uses the untouched
+    // current estimate, preventing trails and cross-surface light leaks.
+    frameRadiance = restirTemporalRadiance(pix, int2(DispatchRaysDimensions().xy),
+            frameRadiance, gv_normal, length(gv_hitCamRel), motion);
     outImage[pix] = float4(frameRadiance, 1.0);
 }
