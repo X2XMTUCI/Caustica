@@ -292,9 +292,6 @@ public final class RtComposite {
     private float mvCamDeltaY;
     private float mvCamDeltaZ;
     private boolean mvHasPrev;
-    // True only when both camera position and the complete jitter-free projection/view transform are
-    // unchanged from the previous rendered frame. This gates the shader's same-pixel radiance EMA.
-    private boolean restirTemporalCameraStable;
     private long atlasSampler;
     private long materialSampler;
     private boolean failed;
@@ -824,41 +821,17 @@ public final class RtComposite {
             mvCamDeltaX = (float) (camX - mvPrevCamX);
             mvCamDeltaY = (float) (camY - mvPrevCamY);
             mvCamDeltaZ = (float) (camZ - mvPrevCamZ);
-            float cameraDelta2 = mvCamDeltaX * mvCamDeltaX
-                    + mvCamDeltaY * mvCamDeltaY + mvCamDeltaZ * mvCamDeltaZ;
-            restirTemporalCameraStable = cameraDelta2 <= 1.0e-10f
-                    && matrixNear(mvPrevProjView, mvCurProjView, 1.0e-6f);
         } else {
             mvPushMatrix.set(mvCurProjView);
             mvCamDeltaX = 0f;
             mvCamDeltaY = 0f;
             mvCamDeltaZ = 0f;
-            restirTemporalCameraStable = false;
         }
         mvPrevProjView.set(mvCurProjView);
         mvPrevCamX = camX;
         mvPrevCamY = camY;
         mvPrevCamZ = camZ;
         mvHasPrev = true;
-    }
-
-    private static boolean matrixNear(Matrix4fc a, Matrix4fc b, float epsilon) {
-        return Math.abs(a.m00() - b.m00()) <= epsilon
-                && Math.abs(a.m01() - b.m01()) <= epsilon
-                && Math.abs(a.m02() - b.m02()) <= epsilon
-                && Math.abs(a.m03() - b.m03()) <= epsilon
-                && Math.abs(a.m10() - b.m10()) <= epsilon
-                && Math.abs(a.m11() - b.m11()) <= epsilon
-                && Math.abs(a.m12() - b.m12()) <= epsilon
-                && Math.abs(a.m13() - b.m13()) <= epsilon
-                && Math.abs(a.m20() - b.m20()) <= epsilon
-                && Math.abs(a.m21() - b.m21()) <= epsilon
-                && Math.abs(a.m22() - b.m22()) <= epsilon
-                && Math.abs(a.m23() - b.m23()) <= epsilon
-                && Math.abs(a.m30() - b.m30()) <= epsilon
-                && Math.abs(a.m31() - b.m31()) <= epsilon
-                && Math.abs(a.m32() - b.m32()) <= epsilon
-                && Math.abs(a.m33() - b.m33()) <= epsilon;
     }
 
     /**
@@ -1046,9 +1019,6 @@ public final class RtComposite {
                 if (restirHistoryValid) {
                     flags |= 0b1000000000; // previous ping-pong image contains initialized history
                 }
-                if (restirHistoryValid && restirTemporalCameraStable) {
-                    flags |= 0b10000000000; // same-pixel radiance EMA: camera transform is unchanged
-                }
             }
 
             // W1/W2 water parameters: camera-biome tint plus wrapped animation time. Per-water-body tint
@@ -1077,12 +1047,6 @@ public final class RtComposite {
             RtEntities.FrameEntities fe = RtEntities.INSTANCE.beginFrame(ctx, staticInstances,
                     terrain.blockX, terrain.blockY, terrain.blockZ, camX, camY, camZ, frameProjection, frameViewRotation);
             int emissiveLightCount = restirEnabled ? updateEmissiveLights(terrain) : 0;
-            // updateEmissiveLights can invalidate history after a terrain/Voxy publication or rebase.
-            // The flags were assembled just before that update, so clear both history consumers again
-            // here rather than exposing the just-invalidated ping-pong images for one frame.
-            if (!restirHistoryValid) {
-                flags &= ~0b11000000000;
-            }
             long emissiveLightAddress = emissiveLightCount == 0 ? 0L : emissiveLightBuffer.deviceAddress;
             Float4 waterAnchor = new Float4(terrain.blockX & WATER_ANCHOR_MASK,
                     terrain.blockZ & WATER_ANCHOR_MASK, 0f, 0f);

@@ -5,8 +5,8 @@
 Install both files:
 
 - `caustica-0.1.0-voxy-compat.jar`
-  - Size: 40,233,345 bytes
-  - SHA-256: `160F50F69D5E695FBC3871E5BBE5FAEC8B17E884EF428D802B751826694C179C`
+  - Size: 40,205,013 bytes
+  - SHA-256: `881F4FA445A861B4E2EE71B331F87B843158344530849AF73544F2426F6605D2`
 - `voxy-0.2.18-beta-caustica.11-mc26.2.jar`
   - Size: 38,810,490 bytes
   - SHA-256: `1FC472DA6C3986D74E68EBF794B2D234BDF9CD9FD41E0E13BB4E860FF1EF516B`
@@ -43,24 +43,10 @@ The final endpoint remains fully ray traced, but tiny bright torch quads and spa
 no longer produce rare, enormous samples that Ray Reconstruction spreads into white/orange patches
 and structured stripes. Average emitted power drives the triangle CDF and cancels analytically
 against the proposal PDF; a packed average chromaticity supplies colour after endpoint validation.
-Spatial reuse no longer samples the same invariant four-pixel cross: each tap uses a per-pixel
-decorrelated disk pattern, and spatial history has stricter normal/depth rejection than temporal
-reprojection. The disk is stable between frames rather than being regenerated from `frameIndex`,
-so its complete neighbour set no longer jumps and flickers every frame. A spatial reservoir imports
-at most four represented samples while preserving its average weight; this prevents correlated
-reservoirs from multiplying one bright local-light selection across the screen. Only the temporally
-reprojected reservoir is persisted for the next frame; the spatially merged result is a terminal
-lighting estimate and is never fed back into neighbouring histories. This removes the cyclic spatial
-feedback that previously made otherwise stable reservoirs pulse between frames. Together these
-changes remove the regular micro-grid, red/orange sparkle and leakage across silhouettes or
-rasterization-triangle boundaries.
-The raw radiance input now applies a five-frame stationary EMA before Ray Reconstruction. The CPU
-enables it only when camera position and the complete jitter-free view/projection transform exactly
-match the previous rendered frame; dynamic receiver motion is rejected separately. Same-surface
-validation tolerates high-resolution normal-map variation from DLSS jitter while retaining strict
-depth and hemisphere checks. Camera motion, disocclusions, sky, water, glass and invalidated reservoir
-history bypass accumulation immediately. This reduces crawling one-ray torch/GI noise without extra
-rays, descriptors or VRAM and without cross-pixel history reads that could produce ghost trails.
+Spatial reuse no longer samples the same invariant four-pixel cross: each tap uses a decorrelated
+disk pattern, and spatial history has stricter normal/depth rejection than temporal reprojection.
+This removes the regular micro-grid and prevents bright reservoirs from leaking across silhouettes
+or rasterization-triangle boundaries.
 The user-facing candidate count and spatial reuse controls remain available.
 The `.11` build adds live Voxy controls to Caustica's Video Settings screen: enable/disable,
 new-chunk ingestion, a stepped 32-512 chunk LOD distance, and a bounded rebuild button. Changes

@@ -142,23 +142,8 @@ final class RtReliefPathTracingShaderTest {
         assertTrue(raygen.contains("expectedPreviousDepth * 0.0125"));
         assertTrue(raygen.contains("restirSpatialOffset(reuse, pixel)"));
         assertFalse(raygen.contains("if (reuse == 1) offset = int2(4, 0)"));
-        assertFalse(raygen.contains("^ worldPush.frameIndex * 0xcb1ab31fu"));
-        assertTrue(raygen.contains("RESTIR_SPATIAL_MAX_M = 4.0"));
-        assertTrue(raygen.contains(
-                "float mergedM = min(previousM, RESTIR_SPATIAL_MAX_M)"));
-        assertTrue(raygen.contains("RestirReservoir temporalReservoir = reservoir"));
-        assertTrue(raygen.contains("restirReservoirNormalization(temporalReservoir)"));
-        assertTrue(raygen.contains("temporalReservoir.sample.measure"));
-        assertTrue(raygen.contains("restirPackState(historyNormalization, temporalReservoir.M)"));
-        assertFalse(raygen.contains("restirPackState(normalization, reservoir.M)"));
-        assertTrue(raygen.contains("RESTIR_TEMPORAL_CURRENT_WEIGHT = 0.20"));
-        assertTrue(raygen.contains("(worldPush.flags & RESTIR_TEMPORAL_STABLE) == 0u"));
-        assertTrue(raygen.contains("dot(objectMotion, objectMotion) > 1.0e-10"));
-        assertTrue(raygen.contains("dot(previousNormal, receiverNormal) > 0.25"));
-        assertTrue(raygen.contains("restirTemporalRadiance(pix"));
-        assertTrue(raygen.contains("outImage[pixel].rgb"));
         assertTrue(raygen.contains("abs(surfaceData.z - expectedPreviousDepth) <= depthTolerance"));
-        assertTrue(raygen.contains("pHat * previousW * mergedM"));
+        assertTrue(raygen.contains("pHat * previousW * previousM"));
         assertTrue(raygen.contains("restirNormalization"));
         assertTrue(raygen.contains("visibility(shadowP, lightDir, 10000.0) * heightVis"));
         assertFalse(raygen.contains("visibility(shadowP, candidateDir"));
@@ -169,7 +154,7 @@ final class RtReliefPathTracingShaderTest {
         assertTrue(raygen.contains("pHat * inversePdf"));
         assertTrue(raygen.contains("EMISSIVE_STRENGTH * sample.measure"));
         assertTrue(raygen.contains("bool restirThisVertex = (worldPush.flags & RESTIR_ENABLED) != 0u"));
-        assertTrue(raygen.contains("temporalReservoir.sample.value - worldPush.camOffset"));
+        assertTrue(raygen.contains("reservoir.sample.value - worldPush.camOffset"));
         assertTrue(raygen.contains("sampleData.xyz + worldPush.camOffset - worldPush.camDelta"));
         assertTrue(raygen.contains("!emissionCoveredByPreviousNee"));
         assertTrue(raygen.contains("bool localRestirDomain = restirThisVertex"));
@@ -184,10 +169,6 @@ final class RtReliefPathTracingShaderTest {
         assertTrue(miss.contains("[[vk::binding(13, 0)]] Sampler2D celestialsAtlas;"));
         assertFalse(miss.contains("[[vk::binding(9, 0)]] Sampler2D celestialsAtlas;"));
         assertTrue(composite.contains("flags |= 0b1000000000"));
-        assertTrue(composite.contains("flags |= 0b10000000000"));
-        assertTrue(composite.contains("restirTemporalCameraStable = cameraDelta2 <= 1.0e-10f"));
-        assertTrue(composite.contains("matrixNear(mvPrevProjView, mvCurProjView, 1.0e-6f)"));
-        assertTrue(composite.contains("flags &= ~0b11000000000"));
         assertTrue(composite.contains("MAX_EMISSIVE_LIGHT_TRIANGLES = 65_536"));
         assertTrue(composite.contains("STATIC_EMISSIVE_LIGHT_TRIANGLE_LIMIT = 60_000"));
         assertTrue(composite.contains("DISTANT_EMISSIVE_LIGHT_TRIANGLE_BUDGET = 512"));

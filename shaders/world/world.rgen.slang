@@ -16,9 +16,8 @@
 //
 // SER: the build emits EXT and NV shader-invocation-reorder variants from this source.
 //
-// Each frame emits a single SPP-averaged estimate. A short, surface-validated stationary history
-// suppresses the worst one-sample ReSTIR/GI variance before DLSS-RR; moving/disoccluded pixels remain
-// untouched. With RR disabled the result is still only a lightly stabilized reference view.
+// Each frame emits a single SPP-averaged (still noisy) estimate; temporal convergence is the denoiser's
+// job. With RR disabled the output is the raw noisy path trace — a reference view, not a converged image.
 import world_common;
 
 [[vk::push_constant]] WorldPushConstants pc;
@@ -487,11 +486,8 @@ float3 sampleSquare(float3 axis, float halfAngle, inout uint s) {
 static const uint RESTIR_ENABLED = 0x80u;
 static const uint RESTIR_SPATIAL = 0x100u;
 static const uint RESTIR_HISTORY_VALID = 0x200u;
-static const uint RESTIR_TEMPORAL_STABLE = 0x400u;
 static const float RESTIR_MAX_M = 32.0;
-static const float RESTIR_SPATIAL_MAX_M = 4.0;
 static const float RESTIR_MAX_W = 64.0;
-static const float RESTIR_TEMPORAL_CURRENT_WEIGHT = 0.20;
 
 struct EmissiveTriangle {
     float4 p0;
@@ -580,20 +576,6 @@ void restirUpdate(inout RestirReservoir reservoir, RestirSample sample, float pH
     }
     reservoir.weightSum = newWeightSum;
     reservoir.M += candidateM;
-}
-
-void restirClampPopulation(inout RestirReservoir reservoir) {
-    if (reservoir.M > RESTIR_MAX_M) {
-        reservoir.weightSum *= RESTIR_MAX_M / reservoir.M;
-        reservoir.M = RESTIR_MAX_M;
-    }
-}
-
-float restirReservoirNormalization(RestirReservoir reservoir) {
-    return reservoir.selectedPHat > 1.0e-8 && reservoir.M > 0.0
-            ? clamp(reservoir.weightSum / (reservoir.M * reservoir.selectedPHat),
-                    0.0, RESTIR_MAX_W)
-            : 0.0;
 }
 
 float3 restirBrdfResponse(float3 n, float3 v, float3 lightDir, float3 diffAlb,
@@ -768,12 +750,11 @@ bool restirPreviousCandidate(int2 pixel, int2 size, float3 receiverNormal,
 int2 restirSpatialOffset(int reuseIndex, int2 pixel) {
     // The old pattern was the invariant set {(+/-4, 0), (0, +/-4)}. Rotating that cross only
     // permuted the same four samples, producing the visible 4-pixel grid after DLSS reconstruction.
-    // Hash every tap independently and sample a small disk so adjacent pixels do not share a rigid
-    // lattice. Deliberately keep this pattern stable between frames: frameIndex here made the entire
-    // neighbour set jump every frame and turned rare bright local-light reservoirs into red sparkles.
-    // The temporal tap remains exactly at the reprojected pixel.
+    // Hash every tap independently and sample a small disk so adjacent pixels and frames no longer
+    // share a rigid lattice. The temporal tap remains exactly at the reprojected pixel.
     uint offsetSeed = uint(pixel.x) * 0x8da6b343u
             ^ uint(pixel.y) * 0xd8163841u
+            ^ worldPush.frameIndex * 0xcb1ab31fu
             ^ uint(reuseIndex) * 0x165667b1u;
     float angle = rndf(offsetSeed) * 6.28318530718;
     float radius = 1.0 + 3.0 * sqrt(rndf(offsetSeed));
@@ -782,52 +763,6 @@ int2 restirSpatialOffset(int reuseIndex, int2 pixel) {
         offset.x = (offsetSeed & 1u) == 0u ? 1 : -1;
     }
     return offset;
-}
-
-bool restirTemporalSurfaceCompatible(int2 pixel, int2 size, float3 receiverNormal,
-                                     float receiverDepth) {
-    if (pixel.x < 0 || pixel.y < 0 || pixel.x >= size.x || pixel.y >= size.y
-            || (worldPush.flags & RESTIR_HISTORY_VALID) == 0u) {
-        return false;
-    }
-    float4 surfaceData = restirLoadPreviousSurface(pixel);
-    if (!(surfaceData.z > 0.0 && surfaceData.z < 20000.0)
-            || !(receiverDepth > 0.0 && receiverDepth < 20000.0)) {
-        return false;
-    }
-    float3 previousNormal = restirDecodeNormal(surfaceData.xy);
-    // This is a shading normal and can legitimately change inside one high-resolution normal-map
-    // texel as the DLSS jitter moves. Only reject a different geometric hemisphere; camera stability
-    // and depth perform the precise same-surface test.
-    if (!(dot(previousNormal, receiverNormal) > 0.25)) {
-        return false;
-    }
-    float depthTolerance = max(0.05, receiverDepth * 0.005);
-    return abs(surfaceData.z - receiverDepth) <= depthTolerance;
-}
-
-float3 restirTemporalRadiance(int2 pixel, int2 size, float3 currentRadiance,
-                              float3 receiverNormal, float receiverDepth, float3 objectMotion) {
-    // Reading and then writing the same pixel is race-free: no invocation touches a neighbour. History
-    // is enabled by a CPU-side exact camera transform comparison. Per-pixel screen motion was the
-    // wrong gate: DLSS jitter kept it non-zero while standing, while parallax could make it nearly zero
-    // during real movement. Dynamic receivers are rejected independently by their world displacement.
-    if ((worldPush.flags & RESTIR_ENABLED) == 0u || worldPush.breakingPad2 == 0u
-            || (worldPush.flags & RESTIR_TEMPORAL_STABLE) == 0u
-            || dot(objectMotion, objectMotion) > 1.0e-10
-            || !restirTemporalSurfaceCompatible(pixel, size, receiverNormal, receiverDepth)) {
-        return currentRadiance;
-    }
-    float3 previousRadiance = outImage[pixel].rgb;
-    // Comparisons reject NaN as well as stale half-float overflow. Do not clamp a valid stochastic
-    // sample: a fixed five-frame EMA remains energy preserving and DLSS-RR performs the final
-    // edge-aware reconstruction.
-    if (!(previousRadiance.r >= 0.0 && previousRadiance.r < 65504.0)
-            || !(previousRadiance.g >= 0.0 && previousRadiance.g < 65504.0)
-            || !(previousRadiance.b >= 0.0 && previousRadiance.b < 65504.0)) {
-        return currentRadiance;
-    }
-    return lerp(previousRadiance, currentRadiance, RESTIR_TEMPORAL_CURRENT_WEIGHT);
 }
 
 RestirSample restirSelectDirect(int2 pixel, int2 size, float3 receiverPos, float3 historyHitPos,
@@ -876,61 +811,52 @@ RestirSample restirSelectDirect(int2 pixel, int2 size, float3 receiverPos, float
         previousPixel = int2(floor(previousUv * float2(size)));
     }
 
-    // First merge only this receiver's reprojected temporal reservoir. This is the state persisted
-    // for the next frame. Persisting the final spatial result creates a feedback loop: neighbouring
-    // pixels repeatedly re-import reservoirs that already contain one another, so a bright selection
-    // circulates and flickers even with a stable spatial pattern.
-    if (canReuse) {
+    int reuseCount = (worldPush.flags & RESTIR_SPATIAL) != 0u ? 5 : 1;
+    [loop]
+    for (int reuse = 0; reuse < reuseCount && canReuse; ++reuse) {
+        bool spatialCandidate = reuse != 0;
+        int2 offset = spatialCandidate
+                ? restirSpatialOffset(reuse, pixel)
+                : int2(0, 0);
+
         RestirSample previousSample;
         float previousW;
         float previousM;
-        if (restirPreviousCandidate(previousPixel, size, receiverNormal,
-                expectedPreviousDepth, false, previousSample, previousW, previousM)
-                && !((hasLocal && previousSample.measure < 0.0)
-                || (!hasLocal && previousSample.measure > 0.0))) {
-            float pHat = restirPHat(previousSample, receiverPos, receiverNormal,
-                    v, diffAlb, F0, rough, pbr);
-            restirUpdate(reservoir, previousSample, pHat, pHat * previousW * previousM,
-                    previousM, seed);
+        if (!restirPreviousCandidate(previousPixel + offset, size, receiverNormal,
+                expectedPreviousDepth, spatialCandidate, previousSample, previousW, previousM)) {
+            continue;
         }
+        // Geometry-list publication invalidates static history. This additional domain check covers a
+        // dynamic emitter appearing/disappearing between frames without letting a celestial reservoir
+        // contaminate the local one (or vice versa).
+        if ((hasLocal && previousSample.measure < 0.0)
+                || (!hasLocal && previousSample.measure > 0.0)) {
+            continue;
+        }
+        float pHat = restirPHat(previousSample, receiverPos, receiverNormal,
+                v, diffAlb, F0, rough, pbr);
+        // Combine the previous reservoir as one weighted super-candidate:
+        // w = pHat_current(y) * W_previous * M_previous.
+        restirUpdate(reservoir, previousSample, pHat, pHat * previousW * previousM,
+                previousM, seed);
     }
-    restirClampPopulation(reservoir);
-    RestirReservoir temporalReservoir = reservoir;
 
-    // Spatial reuse is a terminal current-frame pass. Read temporal-only neighbour histories and
-    // never feed this spatially merged reservoir back into them.
-    if (canReuse && (worldPush.flags & RESTIR_SPATIAL) != 0u) {
-        [loop]
-        for (int reuse = 1; reuse < 5; ++reuse) {
-            RestirSample previousSample;
-            float previousW;
-            float previousM;
-            int2 offset = restirSpatialOffset(reuse, pixel);
-            if (!restirPreviousCandidate(previousPixel + offset, size, receiverNormal,
-                    expectedPreviousDepth, true, previousSample, previousW, previousM)
-                    || (hasLocal && previousSample.measure < 0.0)
-                    || (!hasLocal && previousSample.measure > 0.0)) {
-                continue;
-            }
-            float pHat = restirPHat(previousSample, receiverPos, receiverNormal,
-                    v, diffAlb, F0, rough, pbr);
-            float mergedM = min(previousM, RESTIR_SPATIAL_MAX_M);
-            restirUpdate(reservoir, previousSample, pHat, pHat * previousW * mergedM,
-                    mergedM, seed);
-        }
+    if (reservoir.M > RESTIR_MAX_M) {
+        reservoir.weightSum *= RESTIR_MAX_M / reservoir.M;
+        reservoir.M = RESTIR_MAX_M;
     }
-    restirClampPopulation(reservoir);
-    normalization = restirReservoirNormalization(reservoir);
+    normalization = reservoir.selectedPHat > 1.0e-8 && reservoir.M > 0.0
+            ? clamp(reservoir.weightSum / (reservoir.M * reservoir.selectedPHat), 0.0, RESTIR_MAX_W)
+            : 0.0;
     float receiverDepth = length(historyHitPos - worldPush.camOffset);
     if (useHistory) {
-        float historyNormalization = restirReservoirNormalization(temporalReservoir);
-        float3 storedValue = temporalReservoir.sample.measure > 0.0
-                ? temporalReservoir.sample.value - worldPush.camOffset
-                : temporalReservoir.sample.value;
+        float3 storedValue = reservoir.sample.measure > 0.0
+                ? reservoir.sample.value - worldPush.camOffset
+                : reservoir.sample.value;
         restirStoreCurrent(pixel,
-                float4(storedValue, temporalReservoir.sample.measure),
+                float4(storedValue, reservoir.sample.measure),
                 float4(restirEncodeNormal(receiverNormal), receiverDepth,
-                        restirPackState(historyNormalization, temporalReservoir.M)));
+                        restirPackState(normalization, reservoir.M)));
     }
     return reservoir.sample;
 }
@@ -1774,11 +1700,6 @@ void main() {
         return;
     }
 
-    // A short stationary prefilter removes the high-frequency one-ray variance that otherwise reaches
-    // DLSS-RR as crawling torch noise. It never reprojects across pixels: any appreciable motion,
-    // disocclusion, normal/depth mismatch, invalidated history, sky, water or glass uses the untouched
-    // current estimate, preventing trails and cross-surface light leaks.
-    frameRadiance = restirTemporalRadiance(pix, int2(DispatchRaysDimensions().xy),
-            frameRadiance, gv_normal, length(gv_hitCamRel), gv_motionObjDisp);
+    // Single noisy estimate; the denoiser (DLSS-RR) handles temporal convergence.
     outImage[pix] = float4(frameRadiance, 1.0);
 }
