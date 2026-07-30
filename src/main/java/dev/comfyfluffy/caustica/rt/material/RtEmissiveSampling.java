@@ -40,14 +40,38 @@ public final class RtEmissiveSampling {
     }
 
     /**
-     * RGBA16F reservoir history cannot retain an unbounded total light weight directly. Store its
-     * square root; raygen squares it after endpoint validation.
+     * Camera-local proposal importance. Multiplying the area/power proposal by inverse squared
+     * distance makes a nearby visible emitter a common bounded sample instead of a one-in-thousands
+     * HDR firefly. The one-block floor keeps lights intersecting the camera neighbourhood finite.
      */
-    public static float encodedTotalWeight(double totalWeight) {
-        if (!(totalWeight > 0.0) || !Double.isFinite(totalWeight)) {
+    public static double distanceImportance(double x, double y, double z,
+                                            double cameraX, double cameraY, double cameraZ) {
+        double dx = x - cameraX;
+        double dy = y - cameraY;
+        double dz = z - cameraZ;
+        double distanceSquared = dx * dx + dy * dy + dz * dz;
+        if (!Double.isFinite(distanceSquared)) {
+            return 0.0;
+        }
+        return 1.0 / Math.max(1.0, distanceSquared);
+    }
+
+    /**
+     * Store a fresh candidate's inverse point-sample PDF as a square root in the triangle metadata.
+     * Raygen squares it only while inserting that candidate; it is deliberately not retained in the
+     * temporal reservoir, whose measure is the selected emitter's physical average power.
+     */
+    public static float encodedInverseProposalWeight(double proposalTotalWeight, double importance) {
+        if (!(proposalTotalWeight > 0.0) || !Double.isFinite(proposalTotalWeight)
+                || !(importance > 0.0) || !Double.isFinite(importance)) {
             return 0.0f;
         }
-        return (float) Math.min(65_500.0, Math.sqrt(totalWeight));
+        return (float) Math.min(65_500.0, Math.sqrt(proposalTotalWeight / importance));
+    }
+
+    /** Compatibility helper for a proposal without an additional importance multiplier. */
+    public static float encodedTotalWeight(double totalWeight) {
+        return encodedInverseProposalWeight(totalWeight, 1.0);
     }
 
     public static float estimatedPower(RtMaterialDesc desc, float fallbackEmission) {

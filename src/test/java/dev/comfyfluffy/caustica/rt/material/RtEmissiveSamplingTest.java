@@ -56,6 +56,28 @@ final class RtEmissiveSamplingTest {
     }
 
     @Test
+    void distanceWeightedProposalKeepsNearLightSamplesBoundedAndUnbiased() {
+        double nearImportance = RtEmissiveSampling.distanceImportance(2.0, 0.0, 0.0,
+                0.0, 0.0, 0.0);
+        double farImportance = RtEmissiveSampling.distanceImportance(20.0, 0.0, 0.0,
+                0.0, 0.0, 0.0);
+        assertEquals(0.25, nearImportance, 1.0e-12);
+        assertEquals(0.0025, farImportance, 1.0e-12);
+
+        double proposalTotal = 3.0;
+        double power = 0.5;
+        double nearInversePdf = Math.pow(
+                RtEmissiveSampling.encodedInverseProposalWeight(
+                        proposalTotal, nearImportance * power), 2.0);
+        double farInversePdf = Math.pow(
+                RtEmissiveSampling.encodedInverseProposalWeight(
+                        proposalTotal, farImportance * power), 2.0);
+        assertEquals(proposalTotal / (nearImportance * power), nearInversePdf, 1.0e-5);
+        assertEquals(proposalTotal / (farImportance * power), farInversePdf, 1.0e-3);
+        assertEquals(100.0, farInversePdf / nearInversePdf, 1.0e-3);
+    }
+
+    @Test
     void sparseTextureCoverageCannotCreateInverseCoverageOutlier() {
         for (float coverage : new float[]{1.0f, 0.1f, 0.01f, 0.001f}) {
             RtMaterialDesc.EmissionSummary summary =

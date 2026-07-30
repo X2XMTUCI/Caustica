@@ -872,7 +872,10 @@ public final class RtComposite {
         }
         int total = RtEntities.INSTANCE.writeEmissiveTriangles(
                 dst, staticEmissiveLightCount, MAX_EMISSIVE_LIGHT_TRIANGLES);
-        finalizeEmissiveDistribution(dst, total);
+        finalizeEmissiveDistribution(dst, total,
+                (float) (camX - terrain.blockX),
+                (float) (camY - terrain.blockY),
+                (float) (camZ - terrain.blockZ));
         // CDF/measure metadata spans both the static prefix and dynamic suffix and is recomputed after
         // moving emitters append, so flush the complete live distribution rather than only the suffix.
         long flushOffset = 0L;
@@ -885,12 +888,14 @@ public final class RtComposite {
     }
 
     /**
-     * Build an area-and-power-weighted lower-bound CDF in p0.w. Every p1.w receives sqrt(totalWeight):
-     * raygen squares it after tracing the sampled endpoint and combines it with the material's average
-     * emitted chromaticity. Average power then analytically cancels the triangle/point proposal PDF,
-     * avoiding the unbounded texel-mask ratios that previously produced white fireflies.
+     * Build a camera-local, distance-weighted area/power CDF in p0.w. Every p1.w receives the square
+     * root of the point-sample inverse PDF: totalProposalWeight / (power * distanceImportance).
+     * Raygen uses that only for the fresh RIS candidate weight; the reservoir itself retains average
+     * emitted power in its measure. This makes nearby relevant lights common samples instead of rare
+     * full-list-energy fireflies while keeping temporal/spatial reservoir reuse mathematically valid.
      */
-    private static void finalizeEmissiveDistribution(ByteBuffer dst, int count) {
+    private static void finalizeEmissiveDistribution(ByteBuffer dst, int count,
+                                                     float cameraX, float cameraY, float cameraZ) {
         double totalWeight = 0.0;
         for (int entry = 0; entry < count; entry++) {
             int base = entry * EMISSIVE_LIGHT_ENTRY_BYTES;
@@ -905,7 +910,15 @@ public final class RtComposite {
             double cz = ax * by - ay * bx;
             double area = 0.5 * Math.sqrt(cx * cx + cy * cy + cz * cz);
             float power = dst.getFloat(base + 44);
-            double weight = area * power;
+            double centroidX = (dst.getFloat(base) + dst.getFloat(base + 16)
+                    + dst.getFloat(base + 32)) / 3.0;
+            double centroidY = (dst.getFloat(base + 4) + dst.getFloat(base + 20)
+                    + dst.getFloat(base + 36)) / 3.0;
+            double centroidZ = (dst.getFloat(base + 8) + dst.getFloat(base + 24)
+                    + dst.getFloat(base + 40)) / 3.0;
+            double importance = RtEmissiveSampling.distanceImportance(
+                    centroidX, centroidY, centroidZ, cameraX, cameraY, cameraZ);
+            double weight = area * power * importance;
             if (!(weight > 0.0) || !Double.isFinite(weight)) {
                 weight = 0.0;
             }
@@ -915,13 +928,23 @@ public final class RtComposite {
         if (!(totalWeight > 0.0) || !Double.isFinite(totalWeight)) {
             return;
         }
-        float encodedTotalWeight = RtEmissiveSampling.encodedTotalWeight(totalWeight);
         for (int entry = 0; entry < count; entry++) {
             int base = entry * EMISSIVE_LIGHT_ENTRY_BYTES;
             float cdf = entry + 1 == count ? 1.0f
                     : (float) Math.min(1.0, dst.getFloat(base + 12) / totalWeight);
             dst.putFloat(base + 12, cdf);
-            dst.putFloat(base + 28, encodedTotalWeight);
+            double centroidX = (dst.getFloat(base) + dst.getFloat(base + 16)
+                    + dst.getFloat(base + 32)) / 3.0;
+            double centroidY = (dst.getFloat(base + 4) + dst.getFloat(base + 20)
+                    + dst.getFloat(base + 36)) / 3.0;
+            double centroidZ = (dst.getFloat(base + 8) + dst.getFloat(base + 24)
+                    + dst.getFloat(base + 40)) / 3.0;
+            double importance = RtEmissiveSampling.distanceImportance(
+                    centroidX, centroidY, centroidZ, cameraX, cameraY, cameraZ);
+            double power = dst.getFloat(base + 44);
+            dst.putFloat(base + 28,
+                    RtEmissiveSampling.encodedInverseProposalWeight(
+                            totalWeight, importance * power));
         }
     }
 
@@ -1012,9 +1035,6 @@ public final class RtComposite {
             // W1 wave-domain anchor: the terrain rebase origin reduced mod 4096 (kept small for shader
             // float precision). hitPos.xz (rebased) + anchor reconstructs a world-pinned coordinate, so the
             // ripple pattern stays fixed in the world as the player moves and the rebase origin shifts.
-            Float4 waterAnchor = new Float4(terrain.blockX & WATER_ANCHOR_MASK,
-                    terrain.blockZ & WATER_ANCHOR_MASK, 0f, 0f);
-
             // Rebuild the TLAS this frame from static section instances merged with dynamic entity
             // instances, bind it into the pipeline's descriptor ring, record the build, then barrier so
             // the trace sees the finished TLAS. Section BLASes are already built (async, by RtTerrain);
@@ -1028,6 +1048,8 @@ public final class RtComposite {
                     terrain.blockX, terrain.blockY, terrain.blockZ, camX, camY, camZ, frameProjection, frameViewRotation);
             int emissiveLightCount = restirEnabled ? updateEmissiveLights(terrain) : 0;
             long emissiveLightAddress = emissiveLightCount == 0 ? 0L : emissiveLightBuffer.deviceAddress;
+            Float4 waterAnchor = new Float4(terrain.blockX & WATER_ANCHOR_MASK,
+                    terrain.blockZ & WATER_ANCHOR_MASK, 0f, 0f);
             // Block-breaking overlay: resolves each destroy-stage RenderType's texture into the
             // SAME bindless entity-texture array (destroy_stage_N.png is a standalone Sampler0 texture,
             // not a block-atlas sprite — see ModelBakery.BREAKING_LOCATIONS/DESTROY_TYPES), so any newly

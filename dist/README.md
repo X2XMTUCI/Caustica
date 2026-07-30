@@ -5,8 +5,8 @@
 Install both files:
 
 - `caustica-0.1.0-voxy-compat.jar`
-  - Size: 40,199,460 bytes
-  - SHA-256: `4765472845DDEF1A0B1DDBD80F249E8DBF3AE4CDCA24FC3383051CDCF6CC83A5`
+  - Size: 40,202,405 bytes
+  - SHA-256: `6C29D3ABEA871AB83B8D918082DB3358F1227FF20446D692CCF65818DCC5E73B`
 - `voxy-0.2.18-beta-caustica.11-mc26.2.jar`
   - Size: 38,810,490 bytes
   - SHA-256: `1FC472DA6C3986D74E68EBF794B2D234BDF9CD9FD41E0E13BB4E860FF1EF516B`
@@ -30,18 +30,20 @@ emissive texels. Video Settings expose the ReSTIR toggle, candidate count and sp
 The celestial-atlas descriptor now follows the expanded guide/reservoir layout at set 0 binding 13.
 The previous shader still used the pre-ReSTIR binding 9 and therefore sampled the `restirA0` storage
 image as the sun/moon atlas, feeding reservoir values back into path misses as extreme HDR radiance.
-The corrected descriptor ABI removes the triangular white/amber feedback and DLSS-RR dot pattern.
+The corrected descriptor ABI removes the celestial-atlas/reservoir feedback source.
 History is invalidated on geometry publication/rebase, world, resource-pack, resolution and
 enable-state changes. Local-emitter proposals are restricted to the nearby 64-block light domain,
-with a separate 512-triangle budget for Voxy/Distant Horizons proxies; the same near-distance
-clamp is used for reservoir selection and final evaluation. This prevents distant LOD emitters
-from creating rare over-weighted torch samples. Within that domain, triangle selection uses a
-CPU-built CDF weighted by actual triangle area and the compiled material's average emitted power.
+with a separate 512-triangle budget for Voxy/Distant Horizons proxies. Within that domain, triangle
+selection uses a CPU-built CDF weighted by actual triangle area, compiled average emitted power and
+inverse squared distance from the camera. The exact inverse proposal PDF is applied only when a fresh
+candidate enters the reservoir; temporal/spatial reuse retains the selected emitter's physical power.
+This corrects the previous reservoir-measure mismatch and makes nearby relevant emitters common
+samples instead of rare samples carrying the energy of the complete 60,000-triangle list.
 The final endpoint remains fully ray traced, but tiny bright torch quads and sparse emission masks
 no longer produce rare, enormous samples that Ray Reconstruction spreads into white/orange patches
 and structured stripes. Average emitted power drives the triangle CDF and cancels analytically
 against the proposal PDF; a packed average chromaticity supplies colour after endpoint validation.
-The estimator is therefore variance-bounded even with the user-facing ReSTIR candidate count set to one.
+The user-facing candidate count and spatial reuse controls remain available.
 The `.11` build adds live Voxy controls to Caustica's Video Settings screen: enable/disable,
 new-chunk ingestion, a stepped 32-512 chunk LOD distance, and a bounded rebuild button. Changes
 are saved to Voxy's own config and rebuild the desired LOD set without re-entering the world.

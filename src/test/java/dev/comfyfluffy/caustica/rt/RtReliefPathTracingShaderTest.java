@@ -148,7 +148,8 @@ final class RtReliefPathTracingShaderTest {
         assertTrue(raygen.contains("RestirSample restirFreshLocal"));
         assertTrue(raygen.contains("float3 restirLocalTarget"));
         assertTrue(raygen.contains("payloadAverageEmissionChroma"));
-        assertTrue(raygen.contains("float totalProposalWeight = sample.measure * sample.measure"));
+        assertTrue(raygen.contains("pHat * inversePdf"));
+        assertTrue(raygen.contains("EMISSIVE_STRENGTH * sample.measure"));
         assertTrue(raygen.contains("bool restirThisVertex = (worldPush.flags & RESTIR_ENABLED) != 0u"));
         assertTrue(raygen.contains("reservoir.sample.value - worldPush.camOffset"));
         assertTrue(raygen.contains("sampleData.xyz + worldPush.camOffset - worldPush.camDelta"));
@@ -169,7 +170,9 @@ final class RtReliefPathTracingShaderTest {
         assertTrue(composite.contains("STATIC_EMISSIVE_LIGHT_TRIANGLE_LIMIT = 60_000"));
         assertTrue(composite.contains("DISTANT_EMISSIVE_LIGHT_TRIANGLE_BUDGET = 512"));
         assertTrue(composite.contains("LOCAL_EMISSIVE_LIGHT_RADIUS = 64.0f"));
-        assertTrue(composite.contains("finalizeEmissiveDistribution(dst, total)"));
+        assertTrue(composite.contains("finalizeEmissiveDistribution(dst, total,"));
+        assertTrue(composite.contains("distanceImportance("));
+        assertTrue(composite.contains("importance * power"));
         assertTrue(raygen.contains("[mid].p0.w < cdfTarget"));
         assertFalse(raygen.contains("restirEmissionProxy"));
         assertFalse(raygen.contains("TEXEL_CANDIDATES"));

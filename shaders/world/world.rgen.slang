@@ -498,7 +498,7 @@ struct EmissiveTriangle {
 };
 
 struct RestirSample {
-    // measure < 0: celestial direction. measure > 0: emitter point and sqrt(total proposal weight).
+    // measure < 0: celestial direction. measure > 0: emitter point and average emitted power.
     float3 value;
     float measure;
 };
@@ -640,20 +640,22 @@ float restirPHat(RestirSample sample, float3 hitPos, float3 n, float3 v,
     if (sample.measure < 0.0) {
         return max(luminance(response * worldPush.lightRadiance.xyz), 0.0);
     }
-    // CPU sampling is proportional to triangle area * average emitted power. Average power cancels
-    // analytically against that proposal in restirLocalTarget; this geometry-only proxy remains stable
-    // across temporal reuse without retaining a triangle-list index.
-    return max(luminance(response) / max(distance * distance, 0.0625), 0.0);
+    // Average emitted power is retained in the reservoir, so the target and the initial proposal are
+    // expressed in the same measure. Chroma and emitter orientation are applied after endpoint
+    // validation; omitting them here is legal for RIS and keeps temporal reuse compact.
+    return max(luminance(response) * sample.measure
+            / max(distance * distance, 0.0625), 0.0);
 }
 
 uint64_t restirLightAddress() {
     return uint64_t(worldPush.breakingPad0) | (uint64_t(worldPush.breakingPad1) << 32);
 }
 
-RestirSample restirFreshLocal(inout uint seed) {
+RestirSample restirFreshLocal(inout uint seed, out float inversePdf) {
     RestirSample sample;
     sample.value = float3(0.0, 0.0, 0.0);
     sample.measure = 0.0;
+    inversePdf = 0.0;
     uint count = worldPush.breakingPad2;
     uint64_t address = restirLightAddress();
     if (count == 0u || address == 0u) {
@@ -684,7 +686,8 @@ RestirSample restirFreshLocal(inout uint seed) {
     float v = rndf(seed);
     float3 bary = float3(1.0 - su, su * (1.0 - v), su * v);
     sample.value = bary.x * p0 + bary.y * p1 + bary.z * p2;
-    sample.measure = triangle.p1.w;
+    sample.measure = triangle.p2.w;
+    inversePdf = triangle.p1.w * triangle.p1.w;
     return sample;
 }
 
@@ -754,8 +757,9 @@ RestirSample restirSelectDirect(int2 pixel, int2 size, float3 receiverPos, float
     [loop]
     for (int i = 0; i < candidates; ++i) {
         RestirSample candidate;
+        float inversePdf = 1.0;
         if (hasLocal) {
-            candidate = restirFreshLocal(seed);
+            candidate = restirFreshLocal(seed, inversePdf);
         } else {
             candidate.value = worldPush.lightDir.xyz;
             if (worldPush.lightDir.w > 0.0) {
@@ -767,7 +771,7 @@ RestirSample restirSelectDirect(int2 pixel, int2 size, float3 receiverPos, float
         // indoors it would win selection, fail its final shadow test, and amplify the rare local sample
         // by the cross-domain normalization. The celestial domain is evaluated independently below.
         float pHat = restirPHat(candidate, receiverPos, receiverNormal, v, diffAlb, F0, rough, pbr);
-        restirUpdate(reservoir, candidate, pHat, pHat, 1.0, seed);
+        restirUpdate(reservoir, candidate, pHat, pHat * inversePdf, 1.0, seed);
     }
 
     // Reproject this receiver into the previous frame. Dynamic geometry supplies its own displacement;
@@ -950,8 +954,7 @@ float3 restirLocalTarget(RestirSample sample, float3 origin, float3 receiverNorm
     if (cosEmitter <= 0.0) {
         return float3(0.0, 0.0, 0.0);
     }
-    float totalProposalWeight = sample.measure * sample.measure;
-    return receiverResponse * emittedChroma * (EMISSIVE_STRENGTH * totalProposalWeight) * cosEmitter
+    return receiverResponse * emittedChroma * (EMISSIVE_STRENGTH * sample.measure) * cosEmitter
             / max(targetDistance * targetDistance, 0.0625);
 }
 
