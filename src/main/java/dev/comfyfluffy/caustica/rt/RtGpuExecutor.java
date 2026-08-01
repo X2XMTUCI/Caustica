@@ -22,7 +22,7 @@ import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.CancellationException;
-import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.LockSupport;
 import java.util.function.BiConsumer;
@@ -55,7 +55,7 @@ public final class RtGpuExecutor {
     private final VulkanQueue computeQueue;
     private final long buildTimeline;
     private final long graphicsTimeline;
-    private final LinkedBlockingQueue<Job> jobs = new LinkedBlockingQueue<>();
+    private final LinkedBlockingDeque<Job> jobs = new LinkedBlockingDeque<>();
     private final AtomicLong nextBuildValue = new AtomicLong();
     private final AtomicLong pendingPublishWaitValue = new AtomicLong();
     private final AtomicLong nextGraphicsValue = new AtomicLong();
@@ -93,19 +93,37 @@ public final class RtGpuExecutor {
      */
     public synchronized Build submit(BooleanSupplier cancelled, Consumer<VkCommandBuffer> record,
                                      Runnable afterSuccess, BiConsumer<Build, Throwable> finished) {
+        return submit(cancelled, record, afterSuccess, finished, false);
+    }
+
+    /**
+     * Enqueue a build, optionally ahead of queued background terrain. Timeline values are assigned when
+     * jobs execute rather than when they enter this deque, so priority reordering remains monotonic.
+     */
+    public synchronized Build submit(BooleanSupplier cancelled, Consumer<VkCommandBuffer> record,
+                                     Runnable afterSuccess, BiConsumer<Build, Throwable> finished,
+                                     boolean urgent) {
         checkExecutorFailure();
         if (closed) {
             throw new IllegalStateException("RT GPU executor is closed");
         }
-        long value = nextBuildValue.incrementAndGet();
-        Build build = new Build(value);
-        jobs.add(new Job(cancelled, record, afterSuccess, finished, build));
+        Build build = new Build();
+        Job job = new Job(cancelled, record, afterSuccess, finished, build);
+        if (urgent) {
+            jobs.addFirst(job);
+        } else {
+            jobs.addLast(job);
+        }
         return build;
     }
 
     /** Mark a completed build visible to terrain publication; the next graphics terrain use waits on it. */
     public void markPublished(Build build) {
-        pendingPublishWaitValue.accumulateAndGet(build.value, Math::max);
+        long value = build.value();
+        if (value == 0L) {
+            throw new IllegalStateException("Cannot publish an RT build before GPU execution");
+        }
+        pendingPublishWaitValue.accumulateAndGet(value, Math::max);
     }
 
     /** Attach the required compute-build wait immediately before the RT command buffer is enqueued. */
@@ -376,6 +394,9 @@ public final class RtGpuExecutor {
     }
 
     private void execute(List<Job> batch) {
+        for (Job job : batch) {
+            job.build.assign(nextBuildValue.incrementAndGet());
+        }
         VkCommandBuffer cmd = null;
         boolean submitted = false;
         boolean completed = false;
@@ -474,9 +495,15 @@ public final class RtGpuExecutor {
     }
 
     public static final class Build {
-        private final long value;
+        private volatile long value;
 
-        private Build(long value) {
+        private Build() {
+        }
+
+        private void assign(long value) {
+            if (value <= 0L || this.value != 0L) {
+                throw new IllegalStateException("RT build timeline value assigned more than once");
+            }
             this.value = value;
         }
 

@@ -51,13 +51,15 @@ import java.nio.LongBuffer;
 public final class RtFramePresenter {
     public static final RtFramePresenter INSTANCE = new RtFramePresenter();
 
-    private static final long ACQUIRE_TIMEOUT_NS = 5_000_000_000L;
+    // Generated frames are optional; never stall a real frame waiting for a spare swapchain image.
+    private static final long ACQUIRE_TIMEOUT_NS = 0L;
 
     private static final long LOG_INTERVAL_NS = 1_000_000_000L;
 
     private long[] acquireSemaphores = new long[0];
     private int acquireCursor;
     private boolean failed;
+    private volatile boolean sequentialPresentMode;
 
     // Frames acquired + recorded this frame, awaiting present at present() HEAD (after MC's submit flush).
     private int[] pendingImageIndex = new int[0];
@@ -77,8 +79,15 @@ public final class RtFramePresenter {
 
     /** Whether FG extra-present should run this frame (enabled, available, in a world). */
     public boolean isActive() {
-        return !failed && RtDlssFg.enabled() && RtDlssFg.INSTANCE.isAvailable()
+        return !failed && sequentialPresentMode && RtDlssFg.enabled() && RtDlssFg.INSTANCE.isAvailable()
                 && Minecraft.getInstance().level != null;
+    }
+
+    public void setSequentialPresentMode(boolean sequentialPresentMode) {
+        this.sequentialPresentMode = sequentialPresentMode;
+        if (!sequentialPresentMode) {
+            pendingCount = 0;
+        }
     }
 
     /**
@@ -97,6 +106,10 @@ public final class RtFramePresenter {
             LongList swapchainImages, long[] presentSemaphores, int swapW, int swapH,
             long backbufferView, long srcImage, int srcW, int srcH, int generatedCount, boolean hdrBackbuffer) {
         pendingCount = 0;
+        // One image is Minecraft's current real frame and one may still be scanned out. Asking for more
+        // than the remainder used to hit the five-second acquire timeout every rendered frame.
+        int availableGeneratedImages = Math.max(0, swapchainImages.size() - 2);
+        generatedCount = Math.min(generatedCount, availableGeneratedImages);
         if (failed || swapchain == 0L || srcImage == 0L || generatedCount <= 0) {
             return;
         }

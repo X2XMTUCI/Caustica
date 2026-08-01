@@ -180,15 +180,21 @@ public abstract class VulkanGpuSurfaceMixin {
 		if (RtDeviceBringup.reflexEnabled()) {
 			RtReflex.INSTANCE.applySleepMode(this.device.vkDevice(), this.swapchain);
 		}
+		String presentMode = String.valueOf(config.presentMode());
+		boolean sequentialPresentMode = presentMode.startsWith("FIFO");
+		RtFramePresenter.INSTANCE.setSequentialPresentMode(sequentialPresentMode);
 		// DLSS-FG diagnostic: MAILBOX/IMMEDIATE present modes let a later present silently replace/skip an
 		// earlier queued-but-not-yet-scanned-out one, which would drop FG's generated frame before the
 		// display ever shows it — even though our vkQueuePresentKHR call itself reports success. FIFO is the
 		// only mode that guarantees every queued present gets its own vblank. Log once per (re)configure so
 		// this is checkable without guessing at the in-game V-Sync setting.
 		if (dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg.enabled()) {
-			CausticaMod.LOGGER.info("DLSS-FG: swapchain present mode = {} (FIFO required for generated frames "
-					+ "to actually display; MAILBOX/IMMEDIATE will silently drop them — enable V-Sync if not FIFO)",
-					config.presentMode());
+			if (sequentialPresentMode) {
+				CausticaMod.LOGGER.info("DLSS-FG: swapchain present mode = {}", presentMode);
+			} else {
+				CausticaMod.LOGGER.warn("DLSS-FG disabled: swapchain present mode = {} drops generated frames; "
+						+ "enable V-Sync to select FIFO", presentMode);
+			}
 		}
 	}
 

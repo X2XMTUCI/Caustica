@@ -3,7 +3,7 @@ package dev.comfyfluffy.caustica.rt.terrain;
 import dev.comfyfluffy.caustica.CausticaConfig;
 import dev.comfyfluffy.caustica.CausticaMod;
 
-import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -25,6 +25,27 @@ public final class RtWorkerPool {
 
     private ThreadPoolExecutor exec;
 
+    private static final class UrgentTask implements Runnable {
+        private final Runnable delegate;
+
+        private UrgentTask(Runnable delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public void run() {
+            delegate.run();
+        }
+    }
+
+    /** ThreadPoolExecutor calls offer(); edits enter at the head, background streaming at the tail. */
+    private static final class WorkQueue extends LinkedBlockingDeque<Runnable> {
+        @Override
+        public boolean offer(Runnable task) {
+            return task instanceof UrgentTask ? offerFirst(task) : offerLast(task);
+        }
+    }
+
     private RtWorkerPool() {}
 
     private static int resolveThreads() {
@@ -45,7 +66,7 @@ public final class RtWorkerPool {
                 }
             };
             ThreadPoolExecutor e = new ThreadPoolExecutor(threads, threads, 30, TimeUnit.SECONDS,
-                    new LinkedBlockingQueue<>(), factory);
+                    new WorkQueue(), factory);
             e.allowCoreThreadTimeOut(true);
             exec = e;
             CausticaMod.LOGGER.info("RT worker pool started with {} thread(s)", threads);
@@ -56,6 +77,11 @@ public final class RtWorkerPool {
     /** Submit worker-owned RT preparation; completion is delivered by the task itself. */
     public void submit(Runnable job) {
         executor().execute(job);
+    }
+
+    /** Submit latency-sensitive block-edit work ahead of queued terrain streaming. */
+    public void submit(boolean urgent, Runnable job) {
+        executor().execute(urgent ? new UrgentTask(job) : job);
     }
 
     /** Stop all workers and drop queued jobs. Safe to call when never started. */

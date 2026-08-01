@@ -488,6 +488,10 @@ static const uint RESTIR_SPATIAL = 0x100u;
 static const uint RESTIR_HISTORY_VALID = 0x200u;
 static const float RESTIR_MAX_M = 32.0;
 static const float RESTIR_MAX_W = 64.0;
+// Local-light targets vary as 1/r^2, so a 32-sample temporal reservoir adapts too slowly when its
+// receiver approaches an emitter. Keep reprojection active, but cap imported local confidence; this
+// preserves temporal reuse without dragging a stale bright selection through many subsequent frames.
+static const float RESTIR_LOCAL_HISTORY_MAX_M = 4.0;
 
 struct EmissiveTriangle {
     float4 p0;
@@ -576,6 +580,20 @@ void restirUpdate(inout RestirReservoir reservoir, RestirSample sample, float pH
     }
     reservoir.weightSum = newWeightSum;
     reservoir.M += candidateM;
+}
+
+void restirClampPopulation(inout RestirReservoir reservoir) {
+    if (reservoir.M > RESTIR_MAX_M) {
+        reservoir.weightSum *= RESTIR_MAX_M / reservoir.M;
+        reservoir.M = RESTIR_MAX_M;
+    }
+}
+
+float restirReservoirNormalization(RestirReservoir reservoir) {
+    return reservoir.selectedPHat > 1.0e-8 && reservoir.M > 0.0
+            ? clamp(reservoir.weightSum / (reservoir.M * reservoir.selectedPHat),
+                    0.0, RESTIR_MAX_W)
+            : 0.0;
 }
 
 float3 restirBrdfResponse(float3 n, float3 v, float3 lightDir, float3 diffAlb,
@@ -811,52 +829,65 @@ RestirSample restirSelectDirect(int2 pixel, int2 size, float3 receiverPos, float
         previousPixel = int2(floor(previousUv * float2(size)));
     }
 
-    int reuseCount = (worldPush.flags & RESTIR_SPATIAL) != 0u ? 5 : 1;
-    [loop]
-    for (int reuse = 0; reuse < reuseCount && canReuse; ++reuse) {
-        bool spatialCandidate = reuse != 0;
-        int2 offset = spatialCandidate
-                ? restirSpatialOffset(reuse, pixel)
-                : int2(0, 0);
-
+    // Persist only fresh + same-receiver temporal reuse. Feeding the spatially merged result back into
+    // history lets neighbouring pixels recursively re-import one another, so a bad bright sample can
+    // survive forever even while the camera and scene are stationary.
+    if (canReuse) {
         RestirSample previousSample;
         float previousW;
         float previousM;
-        if (!restirPreviousCandidate(previousPixel + offset, size, receiverNormal,
-                expectedPreviousDepth, spatialCandidate, previousSample, previousW, previousM)) {
-            continue;
+        if (restirPreviousCandidate(previousPixel, size, receiverNormal,
+                expectedPreviousDepth, false, previousSample, previousW, previousM)
+                && !((hasLocal && previousSample.measure < 0.0)
+                || (!hasLocal && previousSample.measure > 0.0))) {
+            float pHat = restirPHat(previousSample, receiverPos, receiverNormal,
+                    v, diffAlb, F0, rough, pbr);
+            float mergedM = previousSample.measure > 0.0
+                    ? min(previousM, RESTIR_LOCAL_HISTORY_MAX_M)
+                    : previousM;
+            restirUpdate(reservoir, previousSample, pHat, pHat * previousW * mergedM,
+                    mergedM, seed);
         }
-        // Geometry-list publication invalidates static history. This additional domain check covers a
-        // dynamic emitter appearing/disappearing between frames without letting a celestial reservoir
-        // contaminate the local one (or vice versa).
-        if ((hasLocal && previousSample.measure < 0.0)
-                || (!hasLocal && previousSample.measure > 0.0)) {
-            continue;
-        }
-        float pHat = restirPHat(previousSample, receiverPos, receiverNormal,
-                v, diffAlb, F0, rough, pbr);
-        // Combine the previous reservoir as one weighted super-candidate:
-        // w = pHat_current(y) * W_previous * M_previous.
-        restirUpdate(reservoir, previousSample, pHat, pHat * previousW * previousM,
-                previousM, seed);
     }
+    restirClampPopulation(reservoir);
+    RestirReservoir temporalReservoir = reservoir;
 
-    if (reservoir.M > RESTIR_MAX_M) {
-        reservoir.weightSum *= RESTIR_MAX_M / reservoir.M;
-        reservoir.M = RESTIR_MAX_M;
+    // Spatial reuse is terminal for this frame. Neighbours come from temporal-only history, and this
+    // merged reservoir is used for shading but never written back to the ping-pong images.
+    if (canReuse && (worldPush.flags & RESTIR_SPATIAL) != 0u) {
+        [loop]
+        for (int reuse = 1; reuse < 5; ++reuse) {
+            RestirSample previousSample;
+            float previousW;
+            float previousM;
+            int2 offset = restirSpatialOffset(reuse, pixel);
+            if (!restirPreviousCandidate(previousPixel + offset, size, receiverNormal,
+                    expectedPreviousDepth, true, previousSample, previousW, previousM)
+                    || (hasLocal && previousSample.measure < 0.0)
+                    || (!hasLocal && previousSample.measure > 0.0)) {
+                continue;
+            }
+            float pHat = restirPHat(previousSample, receiverPos, receiverNormal,
+                    v, diffAlb, F0, rough, pbr);
+            float mergedM = previousSample.measure > 0.0
+                    ? min(previousM, RESTIR_LOCAL_HISTORY_MAX_M)
+                    : previousM;
+            restirUpdate(reservoir, previousSample, pHat, pHat * previousW * mergedM,
+                    mergedM, seed);
+        }
     }
-    normalization = reservoir.selectedPHat > 1.0e-8 && reservoir.M > 0.0
-            ? clamp(reservoir.weightSum / (reservoir.M * reservoir.selectedPHat), 0.0, RESTIR_MAX_W)
-            : 0.0;
+    restirClampPopulation(reservoir);
+    normalization = restirReservoirNormalization(reservoir);
     float receiverDepth = length(historyHitPos - worldPush.camOffset);
     if (useHistory) {
-        float3 storedValue = reservoir.sample.measure > 0.0
-                ? reservoir.sample.value - worldPush.camOffset
-                : reservoir.sample.value;
+        float historyNormalization = restirReservoirNormalization(temporalReservoir);
+        float3 storedValue = temporalReservoir.sample.measure > 0.0
+                ? temporalReservoir.sample.value - worldPush.camOffset
+                : temporalReservoir.sample.value;
         restirStoreCurrent(pixel,
-                float4(storedValue, reservoir.sample.measure),
+                float4(storedValue, temporalReservoir.sample.measure),
                 float4(restirEncodeNormal(receiverNormal), receiverDepth,
-                        restirPackState(normalization, reservoir.M)));
+                        restirPackState(historyNormalization, temporalReservoir.M)));
     }
     return reservoir.sample;
 }
@@ -976,43 +1007,67 @@ float3 restirLocalTarget(RestirSample sample, float3 origin, float3 receiverNorm
             / max(targetDistance * targetDistance, 0.0625);
 }
 
+static const float FOG_BASE_BLEND = 12.0;
+
 float fogDensityAt(float3 position) {
     float worldY = position.y + worldPush.fogControl.y;
-    float aboveBase = max(0.0, worldY - worldPush.fogControl.x);
+    // A hard max() keeps density continuous at base height but makes its slope discontinuous. With only
+    // four integration taps that derivative kink becomes a visible horizontal fog plane. This compact
+    // C1 smooth maximum spreads the transition over +/- FOG_BASE_BLEND without another ray or texture.
+    float heightDelta = worldY - worldPush.fogControl.x;
+    float transition = clamp(heightDelta + FOG_BASE_BLEND, 0.0, 2.0 * FOG_BASE_BLEND);
+    float aboveBase = transition * transition / (4.0 * FOG_BASE_BLEND)
+            + max(heightDelta - FOG_BASE_BLEND, 0.0);
     return worldPush.fogParams.x * exp(-worldPush.fogParams.y * aboveBase);
 }
 
-// Stable bounded aerial perspective. Four fixed taps integrate both density and directional-light
-// visibility. On the primary camera segment only SUNLIT density contributes to extinction and scattering:
-// a volume fully hidden from the dominant celestial light is visually absent instead of leaving a grey
-// ambient veil under roofs/in caves. Averaging the four visibility taps gives a soft shaft boundary.
+static const float FOG_GAUSS_T[4] = {
+    0.0694318442, 0.3300094782, 0.6699905218, 0.9305681558
+};
+static const float FOG_GAUSS_WEIGHT[4] = {
+    0.1739274226, 0.3260725774, 0.3260725774, 0.1739274226
+};
+
+// Henyey-Greenstein relative to isotropic scattering (the common 1 / 4pi factor cancels). Keeping the
+// isotropic component in fogColor and adding only the forward excess preserves the existing exposure.
+float fogPhase(float cosTheta, float anisotropy) {
+    float g = clamp(anisotropy, 0.0, 0.9);
+    float g2 = g * g;
+    float denominator = max(1.0 + g2 - 2.0 * g * cosTheta, 1.0e-3);
+    return (1.0 - g2) / pow(denominator, 1.5);
+}
+
+// Stable bounded aerial perspective. Four Gauss-Legendre taps integrate height density and traced
+// directional-light visibility much more accurately than four equal midpoint samples at the same cost.
+// Extinction belongs to the medium and therefore never depends on binary sun visibility. Visibility only
+// modulates directional single scattering; putting it inside Beer-Lambert quantized the whole image into
+// four huge fog slabs whenever successive taps crossed a shadow boundary.
 // Secondary path segments retain extinction without four extra shadow rays per bounce.
 // rgb = in-scattered radiance, a = transmittance.
-float4 integrateFogSegment(float3 origin, float3 direction, float distance, bool includeScattering) {
+float4 integrateFogSegment(float3 origin, float3 direction, float distance, bool includeScattering,
+                           bool reachesSky) {
     if (worldPush.fogParams.x <= 1.0e-6 || distance <= 1.0e-4) {
         return float4(0.0, 0.0, 0.0, 1.0);
     }
 
-    float densitySum = 0.0;
-    float visibleDensitySum = 0.0;
+    float integratedDensity = 0.0;
+    float integratedVisibleDensity = 0.0;
     float3 lightDir = normalize(worldPush.lightDir.xyz);
     [unroll]
     for (int i = 0; i < 4; ++i) {
-        float t = distance * (float(i) + 0.5) * 0.25;
+        float t = distance * FOG_GAUSS_T[i];
         float3 samplePos = origin + direction * t;
-        float density = fogDensityAt(samplePos);
-        densitySum += density;
+        float weightedDensity = fogDensityAt(samplePos) * FOG_GAUSS_WEIGHT[i];
+        integratedDensity += weightedDensity;
         if (includeScattering) {
             float3 vis = visibility(samplePos + lightDir * RAY_TMIN, lightDir, 10000.0);
-            visibleDensitySum += density * saturate(luminance(vis));
+            float sampleExposure = saturate(luminance(vis));
+            integratedVisibleDensity += weightedDensity * sampleExposure;
         }
     }
-    // Fog is visible because light reaches and scatters inside it. Using total density here used to dim
-    // the background even when every volume tap was shadowed, so "unlit" fog remained plainly visible.
-    // For the camera segment, mask the complete optical depth by traced celestial visibility. This makes
-    // both in-scattering AND the whitening/extinction disappear in fully unlit regions.
-    float opticalDensitySum = includeScattering ? visibleDensitySum : densitySum;
-    float transmittance = exp(-opticalDensitySum * distance * 0.25);
+    // Beer-Lambert extinction is continuous even in shadow. It darkens distant content there, but cannot
+    // create the bright grey veil that incorrectly made caves look fog-lit.
+    float transmittance = exp(-integratedDensity * distance);
     if (!includeScattering) {
         return float4(0.0, 0.0, 0.0, transmittance);
     }
@@ -1026,14 +1081,21 @@ float4 integrateFogSegment(float3 origin, float3 direction, float distance, bool
     float3 light = max(worldPush.lightRadiance.xyz, float3(0.0, 0.0, 0.0));
     float lightPeak = max(light.r, max(light.g, light.b));
     float3 lightTint = lightPeak > 1.0e-5 ? light / lightPeak : float3(1.0, 1.0, 1.0);
-    float alignment = saturate(dot(normalize(direction), lightDir));
-    float forwardLobe = pow(alignment, lerp(3.0, 14.0, worldPush.fogParams.z));
-    float shaftVisibility = densitySum > 1.0e-7
-            ? saturate(visibleDensitySum / densitySum) : 1.0;
-    fogColor += lightTint * forwardLobe * shaftVisibility * lerp(0.05, 0.38, day);
-    fogColor = min(fogColor, float3(0.85, 0.85, 0.85));
+    float alignment = clamp(dot(normalize(direction), lightDir), -1.0, 1.0);
+    float forwardScatter = min(max(fogPhase(alignment, worldPush.fogParams.z) - 1.0, 0.0), 8.0);
+    float shaftVisibility = integratedDensity > 1.0e-7
+            ? saturate(integratedVisibleDensity / integratedDensity) : 1.0;
+    // A sun shadow is not a cave: an unobstructed camera ray still sees diffuse sky illumination even
+    // when one tall object blocks all four directional samples. Surface-ending rays retain the traced
+    // cave gate, with sqrt softening the coarse four-tap transition without another shadow ray.
+    float ambientVisibility = reachesSky ? 1.0 : sqrt(shaftVisibility);
+    float3 ambientScatter = fogColor * lerp(0.10, 0.22, day) * ambientVisibility;
+    float directScatter = shaftVisibility * (lerp(0.01, 0.08, day)
+            + forwardScatter * lerp(0.006, 0.045, day));
+    float3 scatteringColor = min(ambientScatter + lightTint * directScatter,
+            float3(0.85, 0.85, 0.85));
 
-    float3 inscatter = fogColor * ((1.0 - transmittance) * worldPush.fogControl.z);
+    float3 inscatter = scatteringColor * ((1.0 - transmittance) * worldPush.fogControl.z);
     return float4(inscatter, transmittance);
 }
 
@@ -1151,7 +1213,8 @@ void refractedGuideHit(float3 surfacePos, float3 incidentDir, float3 surfaceNorm
 }
 
 // One Monte Carlo path from (ro, rd). Returns accumulated radiance along the path.
-float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, bool useRestirPrimary,
+float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, float primarySkyFogDistance,
+                 bool useRestirPrimary,
                  int2 pixel, int2 imageSize, inout uint seed) {
     float3 L = float3(0.0, 0.0, 0.0);
     float3 throughput = float3(1.0, 1.0, 1.0);
@@ -1187,10 +1250,15 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, bool useRestirPr
         // Deterministic segment integration removes binary medium-event noise and remains stable under
         // camera motion. Only the primary segment evaluates in-scattering; indirect paths get the same
         // Beer-Lambert extinction without multiplying shadow-ray cost at every bounce.
-        float fogSegment = min(payload.hitT > 0.0 ? payload.hitT : worldPush.fogParams.w,
-                worldPush.fogParams.w);
+        // A constant radial miss distance puts the four visibility taps on camera-centred spheres. Their
+        // intersection with a straight shadow volume projects as the curved bands seen around tall cacti.
+        // Primary sky rays instead share view-depth planes; surface and secondary segments stay unchanged.
+        float fogLimit = bounce == 0 && payload.hitT < 0.0
+                ? primarySkyFogDistance : worldPush.fogParams.w;
+        float fogSegment = min(payload.hitT > 0.0 ? payload.hitT : fogLimit, fogLimit);
         if (!inWater) {
-            float4 fog = integrateFogSegment(ro, rd, fogSegment, bounce == 0);
+            float4 fog = integrateFogSegment(ro, rd, fogSegment, bounce == 0,
+                    payload.hitT < 0.0);
             L += throughput * fog.rgb;
             throughput *= fog.a;
         }
@@ -1445,7 +1513,11 @@ float3 tracePath(float3 ro, float3 rd, float primaryConeSpread, bool useRestirPr
         bool restirHistoryVertex = useRestirPrimary && bounce == 0;
         bool localRestirDomain = restirThisVertex && worldPush.breakingPad2 > 0u;
         if (restirThisVertex) {
-            directSample = restirSelectDirect(pixel, imageSize, shadowP, hitPos, n, payload.motionPrev,
+            // ReSTIR's receiver and its temporal key must describe the same stable macro surface.
+            // The refined POM hit is view-dependent: reprojecting it makes a static reservoir slide
+            // between texels as the camera moves. Relief still affects the current BRDF/material and
+            // traceReliefVisibility(), while ordinary scene visibility stays anchored to the TLAS face.
+            directSample = restirSelectDirect(pixel, imageSize, shadowP, macroHitPos, n, payload.motionPrev,
                     v, diffAlb, F0, rough, pbr, restirHistoryVertex, seed, restirNormalization);
         } else if (worldPush.lightDir.w > 0.0) {
             directSample.value = sampleSquare(directSample.value, worldPush.lightDir.w, seed);
@@ -1613,6 +1685,8 @@ void main() {
     float3 origin = nearP + worldPush.camOffset;
     float3 dir = normalize(farP - nearP);
     float rayConeSpread = primaryRayConeSpread(jndc, size, dir);
+    float3 viewForward = primaryRayDir(float2(0.0, 0.0));
+    float primarySkyFogDistance = worldPush.fogParams.w / max(dot(dir, viewForward), 0.25);
 
     uint seed = (uint(pix.x) * 1973u + uint(pix.y) * 9277u + 26699u) ^ (worldPush.frameIndex * 2654435761u);
 
@@ -1629,7 +1703,8 @@ void main() {
         seed = pcg(seed); // decorrelate per-sample paths (shared camera ray, no AA jitter yet)
         // Update one reservoir per pixel/frame. Additional SPP paths stay independent conventional
         // estimators, so they cannot overwrite or over-count the temporal reservoir.
-        frameRadiance += tracePath(origin, dir, rayConeSpread, restirEnabled && s == 0u,
+        frameRadiance += tracePath(origin, dir, rayConeSpread, primarySkyFogDistance,
+                restirEnabled && s == 0u,
                 pix, int2(DispatchRaysDimensions().xy), seed);
     }
     frameRadiance /= float(spp);

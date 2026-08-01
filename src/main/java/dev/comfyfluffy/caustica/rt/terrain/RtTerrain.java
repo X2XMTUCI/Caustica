@@ -112,6 +112,9 @@ public final class RtTerrain {
     private static final long NO_TESS_TOKEN = Long.MIN_VALUE;
     private static final int NO_MISSING_INDEX = -1;
     private static final long NO_DIRTY_GROUP = 0L;
+    // Interactive edits may briefly exceed the background cap by two tasks, which covers the common
+    // section-boundary case without turning a block update into an unbounded streaming burst.
+    private static final int EDIT_INFLIGHT_HEADROOM = 2;
     // If no render frame has driven a streaming pass for this long, the 20 TPS tick takes over (loading
     // screens / hidden window — states where render-driven streaming has stopped).
     private static final long STREAM_FALLBACK_AFTER_NANOS = 200_000_000L;
@@ -419,20 +422,7 @@ public final class RtTerrain {
         }
 
         // Re-extract edited sections. Drain under a short lock so concurrent block updates are not lost.
-        try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("terrain.dirtyDrain")) {
-            drainDirty();
-            if (!dirtyDrain.isEmpty()) {
-                for (LongIterator it = dirtyDrain.iterator(); it.hasNext(); ) {
-                    long key = it.nextLong();
-                    handleDirtySection(key, NO_DIRTY_GROUP, true);
-                }
-            }
-            if (!dirtyEventDrain.isEmpty()) {
-                for (DirtyEvent event : dirtyEventDrain) {
-                    handleDirtyEvent(event);
-                }
-            }
-        }
+        processDirtySections();
         // Dispatch/drain/build normally runs per render frame (RtComposite → frame()). If no frame has
         // streamed recently — loading screen, no world rendering — drive it from here with the bigger
         // bounded fallback pass so the world still fills.
@@ -448,6 +438,9 @@ public final class RtTerrain {
         if (mc.level == null || mc.player == null) {
             return;
         }
+        // A block event can arrive just after the 20 TPS tick. Consume it on the next rendered frame
+        // instead of adding up to 50 ms before its CPU/GPU work even reaches the priority queues.
+        processDirtySections();
         lastFrameStreamNanos = System.nanoTime();
         stream(ctx);
     }
@@ -491,7 +484,11 @@ public final class RtTerrain {
         // Snapshot and dispatch a bounded number of new worker-owned section builds.
         try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("terrain.snapshotDispatch")) {
             DispatchContext dispatch = null;
-            int dispatchSlots = Math.min(asyncDispatchPerPass(), Math.max(0, maxInflight() - inFlight.size()));
+            int inflightLimit = maxInflight();
+            if (inflightLimit > 0 && !editedQueued.isEmpty()) {
+                inflightLimit += Math.min(EDIT_INFLIGHT_HEADROOM, editedQueued.size());
+            }
+            int dispatchSlots = Math.min(asyncDispatchPerPass(), Math.max(0, inflightLimit - inFlight.size()));
             if (dispatchSlots > 0 && !reextract.isEmpty()) {
                 if (dispatch == null) {
                     dispatch = dispatchContext(ctx, level);
@@ -703,13 +700,13 @@ public final class RtTerrain {
             clearQueuedWork(key, true);
             return false;
         }
+        if (blockEdit) {
+            editedQueued.add(key);
+        }
         // Keep the old geometry resident + traced; re-dispatch and swap when the new mesh is ready
         // (no eviction gap -> no flicker). Non-resident dirty keys re-enter the normal missing queue.
         SectionGeom g = resident.get(key);
         if (g != null) {
-            if (blockEdit) {
-                editedQueued.add(key);
-            }
             if (queuedReextract.add(key)) {
                 reextract.add(key);
             }
@@ -953,6 +950,22 @@ public final class RtTerrain {
         }
     }
 
+    private void processDirtySections() {
+        try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("terrain.dirtyDrain")) {
+            drainDirty();
+            if (!dirtyDrain.isEmpty()) {
+                for (LongIterator it = dirtyDrain.iterator(); it.hasNext(); ) {
+                    handleDirtySection(it.nextLong(), NO_DIRTY_GROUP, true);
+                }
+            }
+            if (!dirtyEventDrain.isEmpty()) {
+                for (DirtyEvent event : dirtyEventDrain) {
+                    handleDirtyEvent(event);
+                }
+            }
+        }
+    }
+
     private static void removeKeysNotIn(LongSet keys, LongOpenHashSet keep) {
         for (LongIterator it = keys.iterator(); it.hasNext(); ) {
             if (!keep.contains(it.nextLong())) {
@@ -1004,6 +1017,9 @@ public final class RtTerrain {
             long key = missing.getLong(read);
             // rank = columnDist²(16+) | |Δy|(0..15): column-major nearest-first.
             long rank = distanceRank(key, pcx, pby >> 4, pcz);
+            if (!editedQueued.contains(key)) {
+                rank |= 1L << 62;
+            }
             if (heapSize < k) {
                 heapRank[heapSize] = rank;
                 heapKey[heapSize] = key;
@@ -1024,6 +1040,7 @@ public final class RtTerrain {
             long key = heapKey[i];
             if (!desired.contains(key) || resident.containsKey(key) || empty.contains(key) || inFlight.containsKey(key)) {
                 removeMissing(key);
+                editedQueued.remove(key);
                 clearQueuedGroup(key, true);
                 continue;
             }
@@ -1033,9 +1050,10 @@ public final class RtTerrain {
                 continue; // stays queued; dispatched once the neighbours load
             }
             int sy = sectionY(key);
+            boolean edited = editedQueued.remove(key);
             removeMissing(key);
             remaining--;
-            dispatchSectionBuild(dispatch, key, sx, sy, sz, false);
+            dispatchSectionBuild(dispatch, key, sx, sy, sz, edited);
         }
     }
 
@@ -1189,7 +1207,7 @@ public final class RtTerrain {
         }
         beginActiveTask();
         try {
-            RtWorkerPool.INSTANCE.submit(() -> {
+            RtWorkerPool.INSTANCE.submit(task.edited, () -> {
                 try {
                     if (!isTaskCurrent(task)) {
                         completeTask(task, null, null, null);
@@ -1271,7 +1289,7 @@ public final class RtTerrain {
                         return;
                     }
                     submitTerrainCompaction(ctx, task, prepared, build);
-                });
+                }, task.edited);
     }
 
     private void submitTerrainCompaction(RtContext ctx, SectionTask task, PreparedSection prepared,

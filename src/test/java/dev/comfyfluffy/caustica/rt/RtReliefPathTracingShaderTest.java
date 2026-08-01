@@ -65,6 +65,10 @@ final class RtReliefPathTracingShaderTest {
         assertTrue(raygen.contains("float3 p = hitPos + rayOriginNormal * SURF_BIAS;"));
         assertTrue(raygen.contains("float3 macroHitPos = ro + rd * payload.hitT;"));
         assertTrue(raygen.contains("float3 shadowSurfacePos = reliefHit ? macroHitPos : hitPos;"));
+        assertTrue(raygen.contains(
+                "restirSelectDirect(pixel, imageSize, shadowP, macroHitPos, n, payload.motionPrev"));
+        assertFalse(raygen.contains(
+                "restirSelectDirect(pixel, imageSize, shadowP, hitPos, n, payload.motionPrev"));
         assertTrue(raygen.contains("visibility(shadowP, lightDir, 10000.0) * heightVis"));
         assertFalse(raygen.contains("visibility(p, lightDir, 10000.0) * heightVis"));
         assertFalse(raygen.contains("payload.parallaxOffset / max(worldPush.parallaxParams.x"));
@@ -112,17 +116,60 @@ final class RtReliefPathTracingShaderTest {
     }
 
     @Test
-    void primaryFogExtinctionUsesTheTracedCelestialVisibilityMask() throws IOException {
+    void fogSeparatesContinuousExtinctionFromCaveGatedSingleScattering() throws IOException {
         String raygen = shader("world.rgen.slang");
 
         assertTrue(raygen.contains(
-                "visibleDensitySum += density * saturate(luminance(vis));"));
+                "static const float FOG_GAUSS_T[4]"));
         assertTrue(raygen.contains(
-                "float opticalDensitySum = includeScattering ? visibleDensitySum : densitySum;"));
+                "static const float FOG_BASE_BLEND = 12.0;"));
         assertTrue(raygen.contains(
-                "float transmittance = exp(-opticalDensitySum * distance * 0.25);"));
+                "float transition = clamp(heightDelta + FOG_BASE_BLEND, 0.0, 2.0 * FOG_BASE_BLEND);"));
         assertFalse(raygen.contains(
-                "float transmittance = exp(-densitySum * distance * 0.25);"));
+                "float aboveBase = max(0.0, worldY - worldPush.fogControl.x);"));
+        assertTrue(raygen.contains(
+                "float weightedDensity = fogDensityAt(samplePos) * FOG_GAUSS_WEIGHT[i];"));
+        assertTrue(raygen.contains(
+                "integratedVisibleDensity += weightedDensity * sampleExposure;"));
+        assertTrue(raygen.contains(
+                "float transmittance = exp(-integratedDensity * distance);"));
+        assertTrue(raygen.contains(
+                "float ambientVisibility = reachesSky ? 1.0 : sqrt(shaftVisibility);"));
+        assertTrue(raygen.contains(
+                "float primarySkyFogDistance = worldPush.fogParams.w / max(dot(dir, viewForward), 0.25);"));
+        assertTrue(raygen.contains(
+                "? primarySkyFogDistance : worldPush.fogParams.w;"));
+        assertFalse(raygen.contains(
+                "payload.hitT > 0.0 ? payload.hitT : worldPush.fogParams.w,"));
+        assertTrue(raygen.contains(
+                "float3 ambientScatter = fogColor * lerp(0.10, 0.22, day) * ambientVisibility;"));
+        assertTrue(raygen.contains(
+                "payload.hitT < 0.0);"));
+        assertFalse(raygen.contains(
+                "celestialExposure = max(celestialExposure, sampleExposure);"));
+        assertTrue(raygen.contains(
+                "float directScatter = shaftVisibility * (lerp(0.01, 0.08, day)"));
+        assertTrue(raygen.contains(
+                "float forwardScatter = min(max(fogPhase(alignment, worldPush.fogParams.z) - 1.0, 0.0), 8.0);"));
+        assertFalse(raygen.contains(
+                "includeScattering ? integratedVisibleDensity : integratedDensity"));
+        assertFalse(raygen.contains(
+                "float forwardLobe = pow(alignment"));
+    }
+
+    @Test
+    void frameGenerationNeverBlocksForUnavailableSwapchainImages() throws IOException {
+        String presenter = Files.readString(Path.of("src", "main", "java", "dev", "comfyfluffy",
+                "caustica", "rt", "RtFramePresenter.java"));
+        String surface = Files.readString(Path.of("src", "main", "java", "dev", "comfyfluffy",
+                "caustica", "mixin", "VulkanGpuSurfaceMixin.java"));
+
+        assertTrue(presenter.contains("private static final long ACQUIRE_TIMEOUT_NS = 0L;"));
+        assertTrue(presenter.contains("swapchainImages.size() - 2"));
+        assertTrue(presenter.contains("generatedCount = Math.min(generatedCount, availableGeneratedImages);"));
+        assertTrue(presenter.contains("sequentialPresentMode && RtDlssFg.enabled()"));
+        assertTrue(surface.contains("presentMode.startsWith(\"FIFO\")"));
+        assertTrue(surface.contains("setSequentialPresentMode(sequentialPresentMode)"));
     }
 
     @Test
@@ -143,7 +190,26 @@ final class RtReliefPathTracingShaderTest {
         assertTrue(raygen.contains("restirSpatialOffset(reuse, pixel)"));
         assertFalse(raygen.contains("if (reuse == 1) offset = int2(4, 0)"));
         assertTrue(raygen.contains("abs(surfaceData.z - expectedPreviousDepth) <= depthTolerance"));
-        assertTrue(raygen.contains("pHat * previousW * previousM"));
+        assertTrue(raygen.contains("RESTIR_LOCAL_HISTORY_MAX_M = 4.0"));
+        assertTrue(raygen.contains(
+                "min(previousM, RESTIR_LOCAL_HISTORY_MAX_M)"));
+        assertTrue(raygen.contains(
+                "pHat * previousW * mergedM"));
+        assertTrue(raygen.contains("RestirReservoir temporalReservoir = reservoir"));
+        assertTrue(raygen.contains("for (int reuse = 1; reuse < 5; ++reuse)"));
+        assertTrue(raygen.contains(
+                "restirPreviousCandidate(previousPixel, size, receiverNormal"));
+        assertTrue(raygen.contains(
+                "restirPreviousCandidate(previousPixel + offset, size, receiverNormal"));
+        assertTrue(raygen.contains(
+                "float historyNormalization = restirReservoirNormalization(temporalReservoir)"));
+        assertTrue(raygen.contains(
+                "float4(storedValue, temporalReservoir.sample.measure)"));
+        assertTrue(raygen.contains(
+                "restirPackState(historyNormalization, temporalReservoir.M)"));
+        assertFalse(raygen.contains("int reuseCount ="));
+        assertFalse(raygen.contains("localHistoryStable"));
+        assertFalse(raygen.contains("RESTIR_LOCAL_REUSE_MIN_DISTANCE2"));
         assertTrue(raygen.contains("restirNormalization"));
         assertTrue(raygen.contains("visibility(shadowP, lightDir, 10000.0) * heightVis"));
         assertFalse(raygen.contains("visibility(shadowP, candidateDir"));
@@ -154,7 +220,8 @@ final class RtReliefPathTracingShaderTest {
         assertTrue(raygen.contains("pHat * inversePdf"));
         assertTrue(raygen.contains("EMISSIVE_STRENGTH * sample.measure"));
         assertTrue(raygen.contains("bool restirThisVertex = (worldPush.flags & RESTIR_ENABLED) != 0u"));
-        assertTrue(raygen.contains("reservoir.sample.value - worldPush.camOffset"));
+        assertTrue(raygen.contains("temporalReservoir.sample.value - worldPush.camOffset"));
+        assertFalse(raygen.contains("float3 storedValue = reservoir.sample.measure"));
         assertTrue(raygen.contains("sampleData.xyz + worldPush.camOffset - worldPush.camDelta"));
         assertTrue(raygen.contains("!emissionCoveredByPreviousNee"));
         assertTrue(raygen.contains("bool localRestirDomain = restirThisVertex"));
