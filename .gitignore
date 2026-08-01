@@ -9,3 +9,8 @@ out/
 *.class
 third_party/
 bin/
+
+# Keep only the current distributable Caustica and Voxy builds in Git.
+dist/*.jar
+!dist/caustica-0.1.0-voxy-compat-restir-fg-nonblocking-straight-fog-shadows.jar
+!dist/voxy-0.2.18-beta-caustica.11-mc26.2.jar
